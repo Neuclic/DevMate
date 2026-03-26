@@ -38,6 +38,8 @@ class SearchSection:
     """Search provider settings."""
 
     tavily_api_key: str
+    default_max_results: int
+    request_timeout_seconds: float
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,8 @@ class McpSection:
 
     server_url: str
     transport: str
+    tool_timeout_seconds: float
+    healthcheck_timeout_seconds: float
 
 
 @dataclass(frozen=True)
@@ -91,9 +95,32 @@ def _read_toml(path: Path) -> dict[str, object]:
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
+def _merge_dicts(
+    base: dict[str, object],
+    overrides: dict[str, object],
+) -> dict[str, object]:
+    merged = dict(base)
+    for key, value in overrides.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_dicts(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _read_merged_toml(path: Path) -> dict[str, object]:
+    base = _read_toml(path)
+    local_override_path = path.with_name(f"{path.stem}.local{path.suffix}")
+    if local_override_path.exists():
+        overrides = _read_toml(local_override_path)
+        return _merge_dicts(base, overrides)
+    return base
+
+
 def load_settings(path: Path) -> AppSettings:
     """Load application settings from a TOML file."""
-    data = _read_toml(path)
+    data = _read_merged_toml(path)
 
     app = data["app"]
     model = data["model"]
@@ -117,10 +144,14 @@ def load_settings(path: Path) -> AppSettings:
         ),
         search=SearchSection(
             tavily_api_key=search["tavily_api_key"],
+            default_max_results=search["default_max_results"],
+            request_timeout_seconds=search["request_timeout_seconds"],
         ),
         mcp=McpSection(
             server_url=mcp["server_url"],
             transport=mcp["transport"],
+            tool_timeout_seconds=mcp["tool_timeout_seconds"],
+            healthcheck_timeout_seconds=mcp["healthcheck_timeout_seconds"],
         ),
         rag=RagSection(
             provider=rag["provider"],

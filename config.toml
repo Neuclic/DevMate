@@ -6,17 +6,25 @@ docs_dir = "docs"
 log_level = "INFO"
 
 [model]
-ai_base_url = "https://api.openai.com/v1"
-api_key = "your_openai_api_key_here"
-model_name = "gpt-4o"
-embedding_model_name = "text-embedding-3-small"
+provider = "minimax"
+api_format = "openai-compatible"
+# International endpoint: https://api.minimax.io/v1
+# China mainland endpoint: https://api.minimaxi.com/v1
+ai_base_url = "https://api.minimax.io/v1"
+api_key = "your_minimax_api_key_here"
+model_name = "MiniMax-M2"
+embedding_model_name = ""
 
 [search]
 tavily_api_key = "your_tavily_api_key_here"
+default_max_results = 5
+request_timeout_seconds = 20.0
 
 [mcp]
 server_url = "http://localhost:8001/mcp"
 transport = "streamable_http"
+tool_timeout_seconds = 30.0
+healthcheck_timeout_seconds = 5.0
 
 [rag]
 provider = "chromadb"
