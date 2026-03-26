@@ -8,6 +8,7 @@ from pathlib import Path
 
 from devmate.config_loader import AppSettings
 from devmate.mcp_client import SearchMcpClient, SearchResult
+from devmate.planning_agent import PlanningAgent
 from devmate.rag_pipeline import KnowledgeBasePipeline
 
 LOGGER = logging.getLogger(__name__)
@@ -19,10 +20,13 @@ class PromptResult:
 
     summary: str
     planned_files: list[str]
+    implementation_steps: list[str]
     retrieved_sources: list[str]
     web_results: list[SearchResult]
     web_search_attempted: bool
+    agent_used_model: bool
     web_search_error: str | None = None
+    agent_error: str | None = None
 
 
 class DevMateRuntime:
@@ -32,6 +36,7 @@ class DevMateRuntime:
         self,
         settings: AppSettings,
         search_client: SearchMcpClient | None = None,
+        planning_agent: PlanningAgent | None = None,
     ) -> None:
         self.settings = settings
         self.knowledge_base = KnowledgeBasePipeline(Path(settings.app.docs_dir))
@@ -41,6 +46,7 @@ class DevMateRuntime:
             tool_timeout_seconds=settings.mcp.tool_timeout_seconds,
             healthcheck_timeout_seconds=settings.mcp.healthcheck_timeout_seconds,
         )
+        self.planning_agent = planning_agent or PlanningAgent(settings)
 
     def handle_prompt(self, prompt: str) -> PromptResult:
         """Simulate a planning run for one prompt."""
@@ -62,27 +68,20 @@ class DevMateRuntime:
                 web_search_error = str(exc)
                 LOGGER.warning("Web search failed for prompt '%s': %s", prompt, exc)
 
-        planned_files = [
-            "pyproject.toml",
-            "config.toml",
-            "src/devmate/main.py",
-            "Dockerfile",
-            "docker-compose.yml",
-        ]
-        summary_parts = [
-            "Skeleton planning run completed.",
-            f"Local RAG matches: {len(sources)}.",
-        ]
-        if web_search_attempted and web_results:
-            summary_parts.append(f"MCP web results: {len(web_results)}.")
-        elif web_search_attempted and web_search_error:
-            summary_parts.append(f"MCP web search unavailable: {web_search_error}")
+        plan = self.planning_agent.build_plan(
+            prompt,
+            local_snippets=snippets,
+            web_results=web_results,
+        )
 
         return PromptResult(
-            summary=" ".join(summary_parts),
-            planned_files=planned_files,
+            summary=plan.summary,
+            planned_files=plan.planned_files,
+            implementation_steps=plan.implementation_steps,
             retrieved_sources=sources,
             web_results=web_results,
             web_search_attempted=web_search_attempted,
+            agent_used_model=plan.used_model,
             web_search_error=web_search_error,
+            agent_error=plan.model_error,
         )

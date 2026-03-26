@@ -50,4 +50,5 @@ select = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-addopts = "--basetemp=.pytest-workspace-temp -o cache_dir=.pytest-workspace-cache"
+addopts = "-p no:cacheprovider"
+

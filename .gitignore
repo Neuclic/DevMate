@@ -27,3 +27,8 @@ Thumbs.db
 config.local.toml
 .env
 .env.*
+pytest_temp_run/
+pytest_cache_run/
+test_scratch/
+.pytest-run-temp/
+.pytest-run-cache/

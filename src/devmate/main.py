@@ -68,6 +68,8 @@ def main() -> int:
         client = SearchMcpClient(
             server_url=settings.mcp.server_url,
             transport=settings.mcp.transport,
+            tool_timeout_seconds=settings.mcp.tool_timeout_seconds,
+            healthcheck_timeout_seconds=settings.mcp.healthcheck_timeout_seconds,
         )
         response = client.search_web(
             args.mcp_query,
@@ -84,7 +86,15 @@ def main() -> int:
     if args.prompt:
         result = runtime.handle_prompt(args.prompt)
         LOGGER.info("Prompt summary: %s", result.summary)
+        LOGGER.info(
+            "Planning mode: %s",
+            "llm" if result.agent_used_model else "fallback",
+        )
         LOGGER.info("Planned files: %s", ", ".join(result.planned_files))
+        LOGGER.info(
+            "Implementation steps: %s",
+            " | ".join(result.implementation_steps),
+        )
         if result.retrieved_sources:
             LOGGER.info(
                 "Local knowledge sources: %s",
@@ -96,6 +106,8 @@ def main() -> int:
                 LOGGER.info("%s | %s", item.title, item.url)
         elif result.web_search_error:
             LOGGER.warning("Web search error: %s", result.web_search_error)
+        if result.agent_error:
+            LOGGER.warning("Planning agent error: %s", result.agent_error)
         return 0
 
     LOGGER.info("DevMate skeleton is ready.")
