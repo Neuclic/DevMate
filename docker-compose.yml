@@ -1,0 +1,9 @@
+services:
+  devmate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: devmate:local
+    volumes:
+      - ./:/app
+    command: ["python", "-m", "devmate"]
