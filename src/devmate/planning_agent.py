@@ -1,19 +1,42 @@
-"""Planning agent that turns retrieved context into an implementation plan."""
+"""LangChain planning agent with tool-driven context gathering."""
 
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain.agents import create_agent
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
 from devmate.config_loader import AppSettings
-from devmate.mcp_client import SearchResult
-from devmate.rag_pipeline import KnowledgeSnippet
+from devmate.mcp_client import SearchMcpClient, SearchResult
+from devmate.rag_pipeline import KnowledgeBasePipeline, KnowledgeSnippet
 
 LOGGER = logging.getLogger(__name__)
+
+
+class PlanResponse(BaseModel):
+    """Structured plan returned by the LangChain agent."""
+
+    summary: str = Field(description="One short sentence summarizing the plan.")
+    planned_files: list[str] = Field(
+        description="Repo-relative file paths that should be edited or created next."
+    )
+    implementation_steps: list[str] = Field(
+        description="Three to six short actionable implementation steps."
+    )
+
+
+@dataclass
+class ToolCapture:
+    """Collected retrieval context used during one agent run."""
+
+    local_snippets: list[KnowledgeSnippet] = field(default_factory=list)
+    web_results: list[SearchResult] = field(default_factory=list)
+    web_search_attempted: bool = False
+    web_search_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -24,6 +47,10 @@ class AgentPlan:
     planned_files: list[str]
     implementation_steps: list[str]
     used_model: bool
+    local_snippets: list[KnowledgeSnippet] = field(default_factory=list)
+    web_results: list[SearchResult] = field(default_factory=list)
+    web_search_attempted: bool = False
+    web_search_error: str | None = None
     model_error: str | None = None
 
 
@@ -38,47 +65,139 @@ class PlanningAgent:
         self,
         prompt: str,
         *,
-        local_snippets: list[KnowledgeSnippet],
-        web_results: list[SearchResult],
+        knowledge_base: KnowledgeBasePipeline | None = None,
+        search_client: SearchMcpClient | None = None,
+        local_snippets: list[KnowledgeSnippet] | None = None,
+        web_results: list[SearchResult] | None = None,
     ) -> AgentPlan:
-        """Build an implementation plan using the configured model when possible."""
+        """Build an implementation plan using tools when the model is available."""
         if not prompt.strip():
             return self._fallback_plan(
                 prompt=prompt,
-                local_snippets=local_snippets,
-                web_results=web_results,
+                local_snippets=local_snippets or [],
+                web_results=web_results or [],
             )
 
         if self._model is None and not self._model_is_configured():
             LOGGER.info("Planning model is not configured. Falling back to heuristic plan.")
-            return self._fallback_plan(
-                prompt=prompt,
+            heuristics = self._collect_heuristic_context(
+                prompt,
+                knowledge_base=knowledge_base,
+                search_client=search_client,
                 local_snippets=local_snippets,
                 web_results=web_results,
             )
+            return self._fallback_plan(
+                prompt=prompt,
+                local_snippets=heuristics.local_snippets,
+                web_results=heuristics.web_results,
+                web_search_attempted=heuristics.web_search_attempted,
+                web_search_error=heuristics.web_search_error,
+            )
+
+        if knowledge_base is None or search_client is None:
+            LOGGER.info("Planning tools are unavailable. Using direct-context planning.")
+            return self._build_plan_from_context(
+                prompt,
+                local_snippets=local_snippets or [],
+                web_results=web_results or [],
+            )
+
+        capture = ToolCapture()
+        agent = create_agent(
+            model=self._get_model(),
+            tools=self._build_tools(knowledge_base, search_client, capture),
+            system_prompt=self._system_prompt(),
+            response_format=PlanResponse,
+            name="devmate-planning-agent",
+        )
 
         try:
-            response = self._get_model().invoke(self._build_messages(prompt, local_snippets, web_results))
-            text = self._message_text(response.content)
-            plan = self._parse_plan_text(text)
+            result = agent.invoke(
+                {"messages": [{"role": "user", "content": prompt}]}
+            )
+            structured = result.get("structured_response")
+            if not isinstance(structured, PlanResponse):
+                raise ValueError("LangChain agent did not return structured plan output.")
             return AgentPlan(
-                summary=plan.summary,
-                planned_files=plan.planned_files,
-                implementation_steps=plan.implementation_steps,
+                summary=structured.summary.strip(),
+                planned_files=[item.strip() for item in structured.planned_files if item.strip()],
+                implementation_steps=[
+                    item.strip() for item in structured.implementation_steps if item.strip()
+                ],
                 used_model=True,
+                local_snippets=capture.local_snippets,
+                web_results=capture.web_results,
+                web_search_attempted=capture.web_search_attempted,
+                web_search_error=capture.web_search_error,
             )
         except Exception as exc:
             LOGGER.warning("Planning model failed, using fallback plan: %s", exc)
-            fallback = self._fallback_plan(
-                prompt=prompt,
+            heuristics = self._collect_heuristic_context(
+                prompt,
+                knowledge_base=knowledge_base,
+                search_client=search_client,
                 local_snippets=local_snippets,
                 web_results=web_results,
+            )
+            fallback = self._fallback_plan(
+                prompt=prompt,
+                local_snippets=heuristics.local_snippets,
+                web_results=heuristics.web_results,
+                web_search_attempted=heuristics.web_search_attempted,
+                web_search_error=heuristics.web_search_error,
             )
             return AgentPlan(
                 summary=fallback.summary,
                 planned_files=fallback.planned_files,
                 implementation_steps=fallback.implementation_steps,
                 used_model=False,
+                local_snippets=fallback.local_snippets,
+                web_results=fallback.web_results,
+                web_search_attempted=fallback.web_search_attempted,
+                web_search_error=fallback.web_search_error,
+                model_error=str(exc),
+            )
+
+    def _build_plan_from_context(
+        self,
+        prompt: str,
+        *,
+        local_snippets: list[KnowledgeSnippet],
+        web_results: list[SearchResult],
+    ) -> AgentPlan:
+        try:
+            response = self._get_model().invoke(
+                self._build_messages(prompt, local_snippets, web_results)
+            )
+            text = self._message_text(response.content)
+            structured = self._parse_plan_text(text)
+            return AgentPlan(
+                summary=structured.summary,
+                planned_files=structured.planned_files,
+                implementation_steps=structured.implementation_steps,
+                used_model=True,
+                local_snippets=local_snippets,
+                web_results=web_results,
+                web_search_attempted=bool(web_results),
+            )
+        except Exception as exc:
+            LOGGER.warning("Direct-context planning failed, using fallback plan: %s", exc)
+            fallback = self._fallback_plan(
+                prompt=prompt,
+                local_snippets=local_snippets,
+                web_results=web_results,
+                web_search_attempted=bool(web_results),
+            )
+            return AgentPlan(
+                summary=fallback.summary,
+                planned_files=fallback.planned_files,
+                implementation_steps=fallback.implementation_steps,
+                used_model=False,
+                local_snippets=fallback.local_snippets,
+                web_results=fallback.web_results,
+                web_search_attempted=fallback.web_search_attempted,
+                web_search_error=fallback.web_search_error,
                 model_error=str(exc),
             )
 
@@ -102,26 +221,88 @@ class PlanningAgent:
             return False
         return not key.lower().startswith("your_")
 
-    def _build_messages(
+    def _build_tools(
         self,
+        knowledge_base: KnowledgeBasePipeline,
+        search_client: SearchMcpClient,
+        capture: ToolCapture,
+    ) -> list[object]:
+        @tool
+        def search_local_knowledge(query: str) -> str:
+            """Search local project documentation and coding guidelines."""
+            snippets = knowledge_base.search(query, limit=self.settings.rag.top_k)
+            capture.local_snippets = snippets
+            if not snippets:
+                return "No local knowledge matches were found."
+            return self._format_local_snippets(snippets)
+
+        @tool
+        def search_web(query: str) -> str:
+            """Search the web for latest external information, APIs, or best practices."""
+            capture.web_search_attempted = True
+            try:
+                response = search_client.search_web(
+                    query,
+                    max_results=self.settings.search.default_max_results,
+                )
+            except Exception as exc:
+                capture.web_search_error = str(exc)
+                return f"Web search unavailable: {exc}"
+            capture.web_results = response.results
+            if not response.results:
+                return "Web search returned no results."
+            return self._format_web_results(response.results)
+
+        return [search_local_knowledge, search_web]
+
+    @staticmethod
+    def _system_prompt() -> str:
+        return (
+            "You are DevMate, a coding assistant planning agent. "
+            "Use tools only when they materially improve the plan. "
+            "Use search_local_knowledge for local docs, templates, and coding guidelines. "
+            "Use search_web for latest external facts, best practices, libraries, or release notes. "
+            "Do not call both tools unless the user request clearly needs both. "
+            "Return a structured plan with concise, practical file targets and steps."
+        )
+
+    @staticmethod
+    def _build_messages(
         prompt: str,
         local_snippets: list[KnowledgeSnippet],
         web_results: list[SearchResult],
-    ) -> list[SystemMessage | HumanMessage]:
-        system_message = SystemMessage(
-            content=(
-                "You are DevMate, a planning agent for a coding assistant. "
-                "Turn the user request plus retrieved context into a concrete implementation plan. "
-                "Return JSON only with the keys: summary, planned_files, implementation_steps. "
-                "summary must be one short sentence. "
-                "planned_files must be a list of repo-relative paths. "
-                "implementation_steps must be a list of 3 to 6 short actionable steps."
-            )
+    ) -> list[dict[str, str]]:
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "You are DevMate, a planning agent for a coding assistant. "
+                    "Turn the user request plus retrieved context into a concrete implementation plan. "
+                    "Return JSON only with the keys: summary, planned_files, implementation_steps. "
+                    "summary must be one short sentence. "
+                    "planned_files must be a list of repo-relative paths. "
+                    "implementation_steps must be a list of 3 to 6 short actionable steps."
+                ),
+            },
+            {
+                "role": "user",
+                "content": PlanningAgent._build_context(prompt, local_snippets, web_results),
+            },
+        ]
+
+    @staticmethod
+    def _format_local_snippets(snippets: list[KnowledgeSnippet]) -> str:
+        return "\n".join(
+            f"- {snippet.source_name} | score={snippet.score:.4f} | {snippet.excerpt}"
+            for snippet in snippets
         )
-        human_message = HumanMessage(
-            content=self._build_context(prompt, local_snippets, web_results)
+
+    @staticmethod
+    def _format_web_results(results: list[SearchResult]) -> str:
+        return "\n".join(
+            f"- {item.title} | {item.url} | {item.snippet}"
+            for item in results
         )
-        return [system_message, human_message]
 
     @staticmethod
     def _build_context(
@@ -162,6 +343,8 @@ class PlanningAgent:
 
     @classmethod
     def _parse_plan_text(cls, text: str) -> AgentPlan:
+        import json
+
         payload = json.loads(cls._extract_json_blob(text))
         summary = str(payload["summary"]).strip()
         planned_files = cls._ensure_string_list(payload.get("planned_files", []))
@@ -200,12 +383,58 @@ class PlanningAgent:
             raise ValueError("Planning response field must be a list.")
         return [str(item).strip() for item in value if str(item).strip()]
 
+    def _collect_heuristic_context(
+        self,
+        prompt: str,
+        *,
+        knowledge_base: KnowledgeBasePipeline | None,
+        search_client: SearchMcpClient | None,
+        local_snippets: list[KnowledgeSnippet] | None,
+        web_results: list[SearchResult] | None,
+    ) -> ToolCapture:
+        capture = ToolCapture(
+            local_snippets=list(local_snippets or []),
+            web_results=list(web_results or []),
+        )
+        if not capture.local_snippets and knowledge_base is not None:
+            capture.local_snippets = knowledge_base.search(prompt, limit=self.settings.rag.top_k)
+        if not capture.web_results and search_client is not None and self._should_search_web(prompt):
+            capture.web_search_attempted = True
+            try:
+                response = search_client.search_web(
+                    prompt,
+                    max_results=self.settings.search.default_max_results,
+                )
+                capture.web_results = response.results
+            except Exception as exc:
+                capture.web_search_error = str(exc)
+                LOGGER.warning("Heuristic web search failed for prompt '%s': %s", prompt, exc)
+        return capture
+
+    @staticmethod
+    def _should_search_web(prompt: str) -> bool:
+        lowered = prompt.lower()
+        markers = (
+            "latest",
+            "release note",
+            "release notes",
+            "best practice",
+            "best practices",
+            "sdk",
+            "api",
+            "framework",
+            "library",
+        )
+        return any(marker in lowered for marker in markers)
+
     @staticmethod
     def _fallback_plan(
         prompt: str,
         *,
         local_snippets: list[KnowledgeSnippet],
         web_results: list[SearchResult],
+        web_search_attempted: bool = False,
+        web_search_error: str | None = None,
     ) -> AgentPlan:
         focus = PlanningAgent._infer_focus(prompt)
         planned_files = [
@@ -239,6 +468,10 @@ class PlanningAgent:
             planned_files=planned_files,
             implementation_steps=steps,
             used_model=False,
+            local_snippets=local_snippets,
+            web_results=web_results,
+            web_search_attempted=web_search_attempted,
+            web_search_error=web_search_error,
         )
 
     @staticmethod

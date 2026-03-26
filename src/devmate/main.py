@@ -7,10 +7,12 @@ import logging
 from pathlib import Path
 
 from devmate.agent_runtime import DevMateRuntime
+from devmate.config_loader import AppSettings
 from devmate.config_loader import load_settings
 from devmate.logging_config import configure_logging
 from devmate.mcp_client import SearchMcpClient
 from devmate.mcp_server import run_mcp_server
+from devmate.rag_pipeline import KnowledgeBasePipeline
 
 LOGGER = logging.getLogger(__name__)
 
@@ -44,12 +46,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Send one query to the configured MCP server through the client.",
     )
     parser.add_argument(
+        "--rag-query",
+        default="",
+        help="Search the local RAG knowledge base only.",
+    )
+    parser.add_argument(
         "--max-results",
         type=int,
         default=5,
         help="Maximum number of Tavily results to request through MCP.",
     )
+    parser.add_argument(
+        "--rag-limit",
+        type=int,
+        default=3,
+        help="Maximum number of local RAG matches to return.",
+    )
     return parser
+
+
+def resolve_rag_manifest_path(settings: AppSettings) -> Path:
+    """Resolve the manifest path used by the local Chroma index."""
+    docs_dir = Path(settings.app.docs_dir)
+    persist_directory = Path(settings.rag.persist_directory)
+    if persist_directory.is_absolute():
+        return persist_directory / "manifest.json"
+    return docs_dir.parent / persist_directory / "manifest.json"
 
 
 def main() -> int:
@@ -79,6 +101,22 @@ def main() -> int:
         LOGGER.info("MCP results: %d", len(response.results))
         for item in response.results:
             LOGGER.info("%s | %s", item.title, item.url)
+        return 0
+
+    if args.rag_query:
+        pipeline = KnowledgeBasePipeline(
+            docs_dir=Path(settings.app.docs_dir),
+            rag_settings=settings.rag,
+            model_settings=settings.model,
+        )
+        results = pipeline.search(args.rag_query, limit=args.rag_limit)
+        manifest_path = resolve_rag_manifest_path(settings)
+        LOGGER.info("RAG query: %s", args.rag_query)
+        LOGGER.info("RAG results: %d", len(results))
+        LOGGER.info("RAG manifest: %s", manifest_path)
+        LOGGER.info("RAG index ready: %s", manifest_path.exists())
+        for item in results:
+            LOGGER.info("%s | %.4f | %s", item.source_name, item.score, item.excerpt)
         return 0
 
     runtime = DevMateRuntime(settings=settings)

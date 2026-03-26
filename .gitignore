@@ -32,3 +32,4 @@ pytest_cache_run/
 test_scratch/
 .pytest-run-temp/
 .pytest-run-cache/
+.chroma/

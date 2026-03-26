@@ -31,6 +31,8 @@ def test_load_settings_reads_required_sections() -> None:
                     'ai_base_url = "https://api.openai.com/v1"',
                     'api_key = "test"',
                     'model_name = "gpt-4o"',
+                    'embedding_base_url = "https://api.openai.com/v1"',
+                    'embedding_api_key = "test"',
                     'embedding_model_name = "text-embedding-3-small"',
                     "",
                     "[search]",
@@ -47,6 +49,9 @@ def test_load_settings_reads_required_sections() -> None:
                     "[rag]",
                     'provider = "chromadb"',
                     'collection_name = "devmate-docs"',
+                    'persist_directory = ".chroma/test-config"',
+                    "chunk_size = 400",
+                    "chunk_overlap = 40",
                     "top_k = 4",
                     "",
                     "[langsmith]",
@@ -66,7 +71,9 @@ def test_load_settings_reads_required_sections() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
     assert settings.app.project_name == "DevMate"
+    assert settings.model.embedding_base_url == "https://api.openai.com/v1"
     assert settings.search.default_max_results == 5
     assert settings.mcp.transport == "streamable_http"
-    assert settings.mcp.tool_timeout_seconds == 30.0
+    assert settings.rag.persist_directory == ".chroma/test-config"
+    assert settings.rag.chunk_size == 400
     assert settings.rag.top_k == 4

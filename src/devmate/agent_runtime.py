@@ -39,7 +39,11 @@ class DevMateRuntime:
         planning_agent: PlanningAgent | None = None,
     ) -> None:
         self.settings = settings
-        self.knowledge_base = KnowledgeBasePipeline(Path(settings.app.docs_dir))
+        self.knowledge_base = KnowledgeBasePipeline(
+            docs_dir=Path(settings.app.docs_dir),
+            rag_settings=settings.rag,
+            model_settings=settings.model,
+        )
         self.search_client = search_client or SearchMcpClient(
             server_url=settings.mcp.server_url,
             transport=settings.mcp.transport,
@@ -50,38 +54,21 @@ class DevMateRuntime:
 
     def handle_prompt(self, prompt: str) -> PromptResult:
         """Simulate a planning run for one prompt."""
-        snippets = self.knowledge_base.search(prompt, limit=self.settings.rag.top_k)
-        sources = [snippet.source_name for snippet in snippets]
-        web_results: list[SearchResult] = []
-        web_search_error: str | None = None
-        web_search_attempted = False
-
-        if prompt.strip():
-            web_search_attempted = True
-            try:
-                response = self.search_client.search_web(
-                    prompt,
-                    max_results=self.settings.search.default_max_results,
-                )
-                web_results = response.results
-            except Exception as exc:
-                web_search_error = str(exc)
-                LOGGER.warning("Web search failed for prompt '%s': %s", prompt, exc)
-
         plan = self.planning_agent.build_plan(
             prompt,
-            local_snippets=snippets,
-            web_results=web_results,
+            knowledge_base=self.knowledge_base,
+            search_client=self.search_client,
         )
+        sources = [snippet.source_name for snippet in plan.local_snippets]
 
         return PromptResult(
             summary=plan.summary,
             planned_files=plan.planned_files,
             implementation_steps=plan.implementation_steps,
             retrieved_sources=sources,
-            web_results=web_results,
-            web_search_attempted=web_search_attempted,
+            web_results=plan.web_results,
+            web_search_attempted=plan.web_search_attempted,
             agent_used_model=plan.used_model,
-            web_search_error=web_search_error,
+            web_search_error=plan.web_search_error,
             agent_error=plan.model_error,
         )

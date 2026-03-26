@@ -43,7 +43,22 @@ class FailingSearchClient:
 class FakePlanningAgent:
     """Fake planning agent used to isolate runtime wiring."""
 
-    def build_plan(self, prompt: str, **_: object) -> AgentPlan:
+    def build_plan(self, prompt: str, **kwargs: object) -> AgentPlan:
+        search_client = kwargs.get("search_client")
+        knowledge_base = kwargs.get("knowledge_base")
+        local_snippets = knowledge_base.search(prompt, limit=4) if knowledge_base else []
+        web_results: list[SearchResult] = []
+        web_search_attempted = False
+        web_search_error: str | None = None
+
+        if search_client is not None:
+            web_search_attempted = True
+            try:
+                response = search_client.search_web(prompt, max_results=5)
+                web_results = response.results
+            except Exception as exc:
+                web_search_error = str(exc)
+
         return AgentPlan(
             summary=f"Plan for: {prompt}",
             planned_files=["src/devmate/agent_runtime.py", "tests/test_agent_runtime.py"],
@@ -53,6 +68,10 @@ class FakePlanningAgent:
                 "Verify the behavior with tests.",
             ],
             used_model=False,
+            local_snippets=local_snippets,
+            web_results=web_results,
+            web_search_attempted=web_search_attempted,
+            web_search_error=web_search_error,
         )
 
 
@@ -75,6 +94,8 @@ def _write_config(path: Path, *, docs_dir: Path) -> None:
                 'ai_base_url = "https://api.minimax.io/v1"',
                 'api_key = "test"',
                 'model_name = "MiniMax-M2"',
+                'embedding_base_url = "https://api.minimax.io/v1"',
+                'embedding_api_key = "test"',
                 'embedding_model_name = ""',
                 "",
                 "[search]",
@@ -91,6 +112,9 @@ def _write_config(path: Path, *, docs_dir: Path) -> None:
                 "[rag]",
                 'provider = "chromadb"',
                 'collection_name = "devmate-docs"',
+                'persist_directory = ".chroma/test-agent-runtime"',
+                "chunk_size = 400",
+                "chunk_overlap = 40",
                 "top_k = 4",
                 "",
                 "[langsmith]",

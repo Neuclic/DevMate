@@ -30,6 +30,8 @@ class ModelSection:
     ai_base_url: str
     api_key: str
     model_name: str
+    embedding_base_url: str
+    embedding_api_key: str
     embedding_model_name: str
 
 
@@ -58,6 +60,9 @@ class RagSection:
 
     provider: str
     collection_name: str
+    persist_directory: str
+    chunk_size: int
+    chunk_overlap: int
     top_k: int
 
 
@@ -140,6 +145,8 @@ def load_settings(path: Path) -> AppSettings:
             ai_base_url=model["ai_base_url"],
             api_key=model["api_key"],
             model_name=model["model_name"],
+            embedding_base_url=model.get("embedding_base_url", model["ai_base_url"]),
+            embedding_api_key=model.get("embedding_api_key", model["api_key"]),
             embedding_model_name=model["embedding_model_name"],
         ),
         search=SearchSection(
@@ -156,6 +163,9 @@ def load_settings(path: Path) -> AppSettings:
         rag=RagSection(
             provider=rag["provider"],
             collection_name=rag["collection_name"],
+            persist_directory=rag["persist_directory"],
+            chunk_size=rag["chunk_size"],
+            chunk_overlap=rag["chunk_overlap"],
             top_k=rag["top_k"],
         ),
         langsmith=LangSmithSection(
