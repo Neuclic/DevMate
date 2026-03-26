@@ -1,4 +1,6 @@
 {
     "kunpeng.remote.ssh.machineinfo": [],
-    "kunpeng.remote.ssh.clientpath": "C:\\Windows\\System32\\OpenSSH\\ssh.exe"
+    "kunpeng.remote.ssh.clientpath": "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python-envs.defaultPackageManager": "ms-python.python:pip"
 }
