@@ -13,6 +13,7 @@ from devmate.mcp_client import SearchMcpClient, SearchResult
 from devmate.planning_agent import PlanningAgent
 from devmate.project_generator import GenerationResult, ProjectGenerator
 from devmate.rag_pipeline import KnowledgeBasePipeline
+from devmate.session_store import SessionStore, SessionTurn
 from devmate.skill_registry import SkillNote, SkillRegistry
 
 
@@ -20,6 +21,7 @@ from devmate.skill_registry import SkillNote, SkillRegistry
 class PromptResult:
     """Structured response returned by the runtime."""
 
+    session_id: str | None
     summary: str
     planned_files: list[str]
     implementation_steps: list[str]
@@ -49,6 +51,7 @@ class DevMateRuntime:
         planning_agent: PlanningAgent | None = None,
         skill_registry: SkillRegistry | None = None,
         project_generator: ProjectGenerator | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         self.settings = settings
         self.knowledge_base = KnowledgeBasePipeline(
@@ -65,6 +68,7 @@ class DevMateRuntime:
         self.skill_registry = skill_registry or SkillRegistry(Path(settings.skills.skills_dir))
         self.planning_agent = planning_agent or PlanningAgent(settings)
         self.project_generator = project_generator or ProjectGenerator(settings)
+        self.session_store = session_store or SessionStore(Path(".sessions"))
 
     @traceable(run_type="chain", name="devmate_handle_prompt")
     def handle_prompt(
@@ -73,13 +77,20 @@ class DevMateRuntime:
         *,
         save_skill_name: str | None = None,
         generate_output_dir: Path | None = None,
+        session_id: str | None = None,
     ) -> PromptResult:
         """Simulate a planning run for one prompt."""
+        conversation_history = (
+            self.session_store.build_conversation_history(session_id, limit=6)
+            if session_id
+            else []
+        )
         plan = self.planning_agent.build_plan(
             prompt,
             knowledge_base=self.knowledge_base,
             search_client=self.search_client,
             skill_registry=self.skill_registry,
+            conversation_history=conversation_history,
         )
         sources = [snippet.source_name for snippet in plan.local_snippets]
         matched_skills = [note.name for note in plan.matched_skills]
@@ -97,7 +108,8 @@ class DevMateRuntime:
                 output_dir=generate_output_dir,
             )
 
-        return PromptResult(
+        result = PromptResult(
+            session_id=session_id,
             summary=plan.summary,
             planned_files=plan.planned_files,
             implementation_steps=plan.implementation_steps,
@@ -124,6 +136,42 @@ class DevMateRuntime:
             agent_error=plan.model_error,
             generation_error=generation.model_error if generation is not None else None,
         )
+        if session_id:
+            self.session_store.append_turn(
+                session_id,
+                SessionTurn(
+                    turn_id=re.sub(r"[^a-zA-Z0-9]+", "-", prompt.strip().lower()).strip("-")
+                    or "turn",
+                    created_at=self._timestamp(),
+                    prompt=prompt,
+                    assistant_summary=result.summary,
+                    planned_files=result.planned_files,
+                    implementation_steps=result.implementation_steps,
+                    matched_skills=result.matched_skills,
+                    retrieved_sources=result.retrieved_sources,
+                    web_results=[
+                        {
+                            "title": item.title,
+                            "url": item.url,
+                            "snippet": item.snippet,
+                            "score": item.score,
+                        }
+                        for item in result.web_results
+                    ],
+                    web_search_attempted=result.web_search_attempted,
+                    web_search_error=result.web_search_error,
+                    agent_used_model=result.agent_used_model,
+                    agent_error=result.agent_error,
+                    generation_output_dir=result.generation_output_dir,
+                    generated_files=result.generated_files or [],
+                    generated_created_files=result.generated_created_files or [],
+                    generated_modified_files=result.generated_modified_files or [],
+                    generation_used_model=result.generation_used_model,
+                    generation_error=result.generation_error,
+                    saved_skill_path=result.saved_skill_path,
+                ),
+            )
+        return result
 
     @staticmethod
     def _build_skill_note(name: str, prompt: str, plan: object) -> SkillNote:
@@ -142,3 +190,9 @@ class DevMateRuntime:
             steps=list(plan.implementation_steps),
             keywords=deduped_keywords[:8],
         )
+
+    @staticmethod
+    def _timestamp() -> str:
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc).isoformat()

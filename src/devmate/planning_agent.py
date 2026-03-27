@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from devmate.config_loader import AppSettings
 from devmate.mcp_client import SearchMcpClient, SearchResult
 from devmate.rag_pipeline import KnowledgeBasePipeline, KnowledgeSnippet
+from devmate.session_store import ConversationTurn
 from devmate.skill_registry import SkillNote, SkillRegistry
 
 LOGGER = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ class PlanningAgent:
         local_snippets: list[KnowledgeSnippet] | None = None,
         matched_skills: list[SkillNote] | None = None,
         web_results: list[SearchResult] | None = None,
+        conversation_history: list[ConversationTurn] | None = None,
     ) -> AgentPlan:
         """Build an implementation plan using tools when the model is available."""
         if not prompt.strip():
@@ -113,6 +115,7 @@ class PlanningAgent:
                 local_snippets=local_snippets or [],
                 matched_skills=matched_skills or [],
                 web_results=web_results or [],
+                conversation_history=conversation_history or [],
             )
 
         capture = ToolCapture()
@@ -124,7 +127,14 @@ class PlanningAgent:
         )
 
         try:
-            result = agent.invoke({"messages": [{"role": "user", "content": prompt}]})
+            result = agent.invoke(
+                {
+                    "messages": self._build_agent_messages(
+                        prompt,
+                        conversation_history or [],
+                    )
+                }
+            )
             text = self._extract_agent_text(result)
             structured = self._parse_plan_text(text)
             return AgentPlan(
@@ -179,10 +189,17 @@ class PlanningAgent:
         local_snippets: list[KnowledgeSnippet],
         matched_skills: list[SkillNote],
         web_results: list[SearchResult],
+        conversation_history: list[ConversationTurn],
     ) -> AgentPlan:
         try:
             response = self._get_model().invoke(
-                self._build_messages(prompt, local_snippets, matched_skills, web_results)
+                self._build_messages(
+                    prompt,
+                    local_snippets,
+                    matched_skills,
+                    web_results,
+                    conversation_history,
+                )
             )
             text = self._message_text(response.content)
             structured = self._parse_plan_text(text)
@@ -302,6 +319,7 @@ class PlanningAgent:
         return (
             "You are DevMate, a coding assistant planning agent. "
             "Use tools only when they materially improve the plan. "
+            "If the user message is a follow-up, preserve continuity with the recent conversation. "
             "Use search_local_knowledge for local docs, templates, and coding guidelines. "
             "Use search_saved_skills to find prior task patterns, then use read_saved_skill on the best match before relying on it. "
             "Use search_web for latest external facts, best practices, libraries, or release notes. "
@@ -317,6 +335,7 @@ class PlanningAgent:
         local_snippets: list[KnowledgeSnippet],
         matched_skills: list[SkillNote],
         web_results: list[SearchResult],
+        conversation_history: list[ConversationTurn],
     ) -> list[dict[str, str]]:
         return [
             {
@@ -337,6 +356,7 @@ class PlanningAgent:
                     local_snippets,
                     matched_skills,
                     web_results,
+                    conversation_history,
                 ),
             },
         ]
@@ -369,7 +389,12 @@ class PlanningAgent:
         local_snippets: list[KnowledgeSnippet],
         matched_skills: list[SkillNote],
         web_results: list[SearchResult],
+        conversation_history: list[ConversationTurn],
     ) -> str:
+        history_block = "\n".join(
+            f"- User: {turn.prompt}\n  Assistant: {turn.assistant_summary}"
+            for turn in conversation_history
+        ) or "- none"
         local_block = "\n".join(
             f"- {snippet.source_name}: {snippet.excerpt}" for snippet in local_snippets
         ) or "- none"
@@ -381,12 +406,25 @@ class PlanningAgent:
             f"- {item.title} | {item.url} | {item.snippet}" for item in web_results
         ) or "- none"
         return (
+            f"Recent conversation history:\n{history_block}\n\n"
             f"User request:\n{prompt}\n\n"
             f"Local knowledge snippets:\n{local_block}\n\n"
             f"Matched saved skills:\n{skill_block}\n\n"
             f"Web results:\n{web_block}\n\n"
             "Generate the next implementation plan for this repository."
         )
+
+    @staticmethod
+    def _build_agent_messages(
+        prompt: str,
+        conversation_history: list[ConversationTurn],
+    ) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        for turn in conversation_history:
+            messages.append({"role": "user", "content": turn.prompt})
+            messages.append({"role": "assistant", "content": turn.assistant_summary})
+        messages.append({"role": "user", "content": prompt})
+        return messages
 
     @staticmethod
     def _message_text(content: object) -> str:

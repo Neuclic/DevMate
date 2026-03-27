@@ -19,7 +19,9 @@ from devmate.observability import langsmith_is_configured
 from devmate.observability import latest_trace_info
 from devmate.observability import trace_start_time
 from devmate.rag_pipeline import KnowledgeBasePipeline
+from devmate.session_store import SessionStore
 from devmate.skill_registry import SkillRegistry
+from devmate.web_app import run_web_app
 
 LOGGER = logging.getLogger(__name__)
 
@@ -46,6 +48,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--print-trace-url",
         action="store_true",
         help="Print the latest LangSmith trace URL after a prompt run.",
+    )
+    parser.add_argument(
+        "--session-id",
+        default="",
+        help="Optional persisted session id used to carry multi-turn context.",
+    )
+    parser.add_argument(
+        "--list-sessions",
+        action="store_true",
+        help="List saved local sessions only.",
     )
     parser.add_argument(
         "--share-trace",
@@ -94,6 +106,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the local MCP server using the configured Streamable HTTP endpoint.",
     )
     parser.add_argument(
+        "--serve-web",
+        action="store_true",
+        help="Run the local DevMate web UI.",
+    )
+    parser.add_argument(
+        "--web-host",
+        default="127.0.0.1",
+        help="Host used when serving the local web UI.",
+    )
+    parser.add_argument(
+        "--web-port",
+        type=int,
+        default=8765,
+        help="Port used when serving the local web UI.",
+    )
+    parser.add_argument(
         "--mcp-query",
         default="",
         help="Send one query to the configured MCP server through the client.",
@@ -134,6 +162,12 @@ def resolve_skills_dir(settings: AppSettings) -> Path:
         return skills_dir
     return Path.cwd() / skills_dir
 
+
+def resolve_sessions_dir() -> Path:
+    """Resolve the local session persistence directory."""
+    return Path.cwd() / ".sessions"
+
+
 def main() -> int:
     """Run the CLI application."""
     parser = build_parser()
@@ -171,6 +205,15 @@ def main() -> int:
 
     if args.serve_mcp:
         run_mcp_server(settings)
+        return 0
+
+    if args.serve_web:
+        LOGGER.info(
+            "Starting DevMate web UI at http://%s:%d",
+            args.web_host,
+            args.web_port,
+        )
+        run_web_app(settings, host=args.web_host, port=args.web_port)
         return 0
 
     if args.mcp_query:
@@ -223,7 +266,26 @@ def main() -> int:
             LOGGER.info("%s | %s", skill.name, ", ".join(skill.keywords) or "no-keywords")
         return 0
 
-    runtime = DevMateRuntime(settings=settings, skill_registry=skills_registry)
+    session_store = SessionStore(resolve_sessions_dir())
+
+    if args.list_sessions:
+        sessions = session_store.list_sessions()
+        LOGGER.info("Saved sessions: %d", len(sessions))
+        for session in sessions:
+            LOGGER.info(
+                "%s | %s | turns=%d | updated=%s",
+                session.session_id,
+                session.title,
+                session.turn_count,
+                session.updated_at,
+            )
+        return 0
+
+    runtime = DevMateRuntime(
+        settings=settings,
+        skill_registry=skills_registry,
+        session_store=session_store,
+    )
 
     if args.prompt:
         started_at = trace_start_time()
@@ -231,7 +293,10 @@ def main() -> int:
             args.prompt,
             save_skill_name=args.save_skill or None,
             generate_output_dir=Path(args.output_dir) if args.generate else None,
+            session_id=args.session_id or None,
         )
+        if result.session_id:
+            LOGGER.info("Session id: %s", result.session_id)
         LOGGER.info("Prompt summary: %s", result.summary)
         LOGGER.info(
             "Planning mode: %s",

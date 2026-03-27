@@ -53,6 +53,37 @@ Expected output highlights:
 
 `generated-output/` is ignored by Git and can be recreated for each demo run.
 
+## Session Memory And Web UI
+
+DevMate now supports persisted local session history in `.sessions/`.
+
+Use one session id across multiple CLI prompts:
+
+```powershell
+cd D:\DevMate
+$env:UV_CACHE_DIR = ".uv-cache"
+uv run devmate --prompt "build a responsive map website" --session-id demo-1
+uv run devmate --prompt "refine the readme and mobile interactions" --session-id demo-1
+uv run devmate --list-sessions
+```
+
+Start the local web UI:
+
+```powershell
+cd D:\DevMate
+$env:UV_CACHE_DIR = ".uv-cache"
+uv run devmate --serve-web
+```
+
+Open `http://127.0.0.1:8765` in your browser.
+
+The web UI supports:
+
+- creating and browsing saved sessions
+- sending prompts with optional file generation
+- saving a skill name from the current run
+- viewing matched skills, local RAG sources, web results, and generated file changes
+
 DevMate 是一个面向面试题的 AI 编程助手项目骨架。当前仓库已经完成本地 Git 初始化，并补齐了可继续开发的目录结构、配置入口、占位源码、Docker 骨架和中文项目计划。
 
 ## 当前目标
