@@ -1,434 +1,68 @@
-"""Minimal local web UI for DevMate."""
+﻿"""Local FastAPI app that powers the DevMate frontend."""
 
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field, model_validator
 import uvicorn
 
 from devmate.agent_runtime import DevMateRuntime
 from devmate.config_loader import AppSettings
-from devmate.session_store import SessionStore
+from devmate.session_store import SessionRecord, SessionStore, SessionSummary, SessionTurn
+from devmate.skill_registry import SkillRegistry
 
 
 HTML_PAGE = """<!DOCTYPE html>
-<html lang="en">
+<html lang=\"en\">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DevMate UI</title>
+  <meta charset=\"UTF-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
+  <title>DevMate API</title>
   <style>
-    :root {
-      --bg: #f4efe8;
-      --panel: rgba(255, 255, 255, 0.86);
-      --ink: #18231f;
-      --accent: #22543d;
-      --accent-soft: #d9efe3;
-      --border: #d7e1dc;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Segoe UI", sans-serif;
-      color: var(--ink);
-      background: radial-gradient(circle at top, #fff8ef 0%, var(--bg) 58%, #e7efe8 100%);
-      min-height: 100vh;
-    }
-    .app {
-      display: grid;
-      grid-template-columns: 300px 1fr;
-      min-height: 100vh;
-      gap: 1rem;
-      padding: 1rem;
-    }
-    .panel {
-      background: var(--panel);
-      border: 1px solid rgba(255,255,255,0.7);
-      backdrop-filter: blur(16px);
-      border-radius: 22px;
-      box-shadow: 0 18px 36px rgba(24,35,31,0.08);
-    }
-    .sidebar {
-      padding: 1rem;
-      display: flex;
-      flex-direction: column;
-      gap: 0.75rem;
-    }
-    .sidebar h1 {
-      margin: 0;
-      font-size: 1.4rem;
-    }
-    .sidebar button, .composer button {
-      border: 0;
-      border-radius: 14px;
-      padding: 0.85rem 1rem;
-      cursor: pointer;
-      font-weight: 600;
-      background: var(--accent);
-      color: white;
-    }
-    .sidebar button.secondary, .composer button.secondary {
-      background: transparent;
-      color: var(--accent);
-      border: 1px solid var(--border);
-    }
-    .session-list {
-      display: grid;
-      gap: 0.6rem;
-      overflow: auto;
-    }
-    .session-item {
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 0.85rem;
-      background: white;
-      cursor: pointer;
-    }
-    .session-item.active {
-      border-color: var(--accent);
-      background: var(--accent-soft);
-    }
-    .main {
-      display: grid;
-      grid-template-rows: 1fr auto;
-      gap: 1rem;
-      min-height: 0;
-    }
-    .messages {
-      padding: 1rem;
-      overflow: auto;
-      display: grid;
-      gap: 0.85rem;
-    }
-    .turn {
-      display: grid;
-      gap: 0.55rem;
-      padding: 0.95rem;
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      background: white;
-    }
-    .prompt {
-      font-weight: 600;
-    }
-    .meta {
-      color: #5a6c63;
-      font-size: 0.92rem;
-    }
-    .chips {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.45rem;
-    }
-    .section-title {
-      margin: 0;
-      font-size: 0.92rem;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: #5a6c63;
-    }
-    .chip {
-      border-radius: 999px;
-      background: #edf5f1;
-      color: var(--accent);
-      padding: 0.2rem 0.6rem;
-      font-size: 0.85rem;
-    }
-    .chip.secondary {
-      background: #f4f1ea;
-      color: #6e5a3a;
-    }
-    .detail-grid {
-      display: grid;
-      gap: 0.55rem;
-    }
-    .detail-card {
-      border: 1px solid #e3ece7;
-      border-radius: 14px;
-      padding: 0.8rem;
-      background: #f8fbf9;
-    }
-    .detail-card a {
-      color: var(--accent);
-      text-decoration: none;
-    }
-    .detail-card a:hover {
-      text-decoration: underline;
-    }
-    .composer {
-      padding: 1rem;
-      display: grid;
-      gap: 0.75rem;
-    }
-    textarea, input[type="text"] {
-      width: 100%;
-      border-radius: 14px;
-      border: 1px solid var(--border);
-      padding: 0.85rem 0.9rem;
-      font: inherit;
-      background: white;
-    }
-    textarea {
-      min-height: 120px;
-      resize: vertical;
-    }
-    .controls {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 0.75rem;
-    }
-    .toggle-row {
-      display: flex;
-      gap: 1rem;
-      flex-wrap: wrap;
-      align-items: center;
-      color: #405149;
-    }
-    .actions {
-      display: flex;
-      gap: 0.75rem;
-      flex-wrap: wrap;
-    }
-    .empty {
-      color: #60746b;
-      padding: 1rem;
-    }
-    code {
-      background: #f2f7f4;
-      border-radius: 8px;
-      padding: 0.1rem 0.4rem;
-    }
-    pre {
-      margin: 0;
-      white-space: pre-wrap;
-      background: #f7fbf8;
-      border-radius: 14px;
-      padding: 0.85rem;
-      border: 1px solid #e3ece7;
-    }
-    @media (max-width: 980px) {
-      .app {
-        grid-template-columns: 1fr;
-      }
-      .main {
-        min-height: 70vh;
-      }
-      .controls {
-        grid-template-columns: 1fr;
-      }
-    }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: 'Segoe UI', sans-serif; background: linear-gradient(180deg, #f8fbff, #edf5ff); color: #0f172a; }
+    main { width: min(720px, calc(100vw - 32px)); border-radius: 28px; background: rgba(255,255,255,0.88); padding: 2rem; box-shadow: 0 24px 60px rgba(15,23,42,0.12); }
+    code { background: #eff6ff; padding: 0.15rem 0.45rem; border-radius: 8px; }
+    a { color: #2563eb; }
   </style>
 </head>
 <body>
-  <div class="app">
-    <aside class="panel sidebar">
-      <div>
-        <h1>DevMate UI</h1>
-        <p class="meta">Saved sessions live in <code>.sessions/</code>.</p>
-      </div>
-      <div class="actions">
-        <button id="new-session">New Session</button>
-        <button id="refresh-sessions" class="secondary">Refresh</button>
-      </div>
-      <div id="session-list" class="session-list"></div>
-    </aside>
-
-    <main class="main">
-      <section id="messages" class="panel messages">
-        <div class="empty">Create or select a session, then send a prompt.</div>
-      </section>
-
-      <section class="panel composer">
-        <textarea id="prompt" placeholder="Describe what you want DevMate to do..."></textarea>
-        <div class="controls">
-          <input id="output-dir" type="text" value="generated-output" placeholder="Output directory when generate is enabled" />
-          <input id="save-skill" type="text" placeholder="Optional skill name to save" />
-        </div>
-        <div class="toggle-row">
-          <label><input id="generate" type="checkbox" checked /> Generate files</label>
-        </div>
-        <div class="actions">
-          <button id="send">Send Prompt</button>
-        </div>
-      </section>
-    </main>
-  </div>
-
-  <script>
-    let currentSessionId = null;
-
-    async function fetchJson(url, options = {}) {
-      const response = await fetch(url, {
-        headers: { "Content-Type": "application/json" },
-        ...options,
-      });
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || `Request failed: ${response.status}`);
-      }
-      return await response.json();
-    }
-
-    function turnCard(turn) {
-      const files = (turn.generated_files || turn.planned_files || []).map((file) => `<span class="chip">${file}</span>`).join("");
-      const created = (turn.generated_created_files || []).map((file) => `<span class="chip secondary">${file}</span>`).join("");
-      const modified = (turn.generated_modified_files || []).map((file) => `<span class="chip secondary">${file}</span>`).join("");
-      const skills = (turn.matched_skills || []).map((item) => `<span class="chip">${item}</span>`).join("");
-      const sources = (turn.retrieved_sources || []).map((item) => `<span class="chip secondary">${item}</span>`).join("");
-      const steps = (turn.implementation_steps || []).map((step) => `<li>${step}</li>`).join("");
-      const webResults = (turn.web_results || []).map((item) => `
-        <div class="detail-card">
-          <div><a href="${escapeHtml(item.url || "#")}" target="_blank" rel="noreferrer">${escapeHtml(item.title || item.url || "Untitled result")}</a></div>
-          <div class="meta">${escapeHtml(item.snippet || "")}</div>
-        </div>
-      `).join("");
-      return `
-        <article class="turn">
-          <div class="prompt">User: ${escapeHtml(turn.prompt)}</div>
-          <div>${escapeHtml(turn.assistant_summary)}</div>
-          <div class="meta">Planning mode: ${turn.agent_used_model ? "llm" : "fallback"}${turn.generation_used_model ? " | generation: llm" : turn.generation_output_dir ? " | generation: template-fallback" : ""}</div>
-          ${skills ? `<div><p class="section-title">Matched Skills</p><div class="chips">${skills}</div></div>` : ""}
-          ${sources ? `<div><p class="section-title">Local Sources</p><div class="chips">${sources}</div></div>` : ""}
-          ${files ? `<div><p class="section-title">Planned / Generated Files</p><div class="chips">${files}</div></div>` : ""}
-          ${created ? `<div><p class="section-title">Created Files</p><div class="chips">${created}</div></div>` : ""}
-          ${modified ? `<div><p class="section-title">Modified Files</p><div class="chips">${modified}</div></div>` : ""}
-          ${steps ? `<ol>${steps}</ol>` : ""}
-          ${turn.generation_output_dir ? `<div class="meta">Output dir: <code>${escapeHtml(turn.generation_output_dir)}</code></div>` : ""}
-          ${turn.saved_skill_path ? `<div class="meta">Saved skill: <code>${escapeHtml(turn.saved_skill_path)}</code></div>` : ""}
-          ${webResults ? `<div><p class="section-title">Web Results</p><div class="detail-grid">${webResults}</div></div>` : ""}
-          ${turn.web_search_error ? `<pre>Web search error: ${escapeHtml(turn.web_search_error)}</pre>` : ""}
-          ${turn.agent_error ? `<pre>Planning error: ${escapeHtml(turn.agent_error)}</pre>` : ""}
-          ${turn.generation_error ? `<pre>Generation error: ${escapeHtml(turn.generation_error)}</pre>` : ""}
-        </article>
-      `;
-    }
-
-    function renderMessages(session) {
-      const container = document.getElementById("messages");
-      if (!session || !session.turns || session.turns.length === 0) {
-        container.innerHTML = `<div class="empty">This session has no turns yet.</div>`;
-        return;
-      }
-      container.innerHTML = session.turns.map(turnCard).join("");
-      container.scrollTop = container.scrollHeight;
-    }
-
-    function renderSessionList(sessions) {
-      const container = document.getElementById("session-list");
-      if (!sessions.length) {
-        container.innerHTML = `<div class="empty">No sessions yet.</div>`;
-        return;
-      }
-      container.innerHTML = sessions.map((session) => `
-        <div class="session-item ${session.session_id === currentSessionId ? "active" : ""}" data-id="${session.session_id}">
-          <div><strong>${escapeHtml(session.title)}</strong></div>
-          <div class="meta">${session.turn_count} turns</div>
-          <div class="meta">${escapeHtml(session.updated_at)}</div>
-        </div>
-      `).join("");
-      container.querySelectorAll(".session-item").forEach((node) => {
-        node.addEventListener("click", async () => {
-          currentSessionId = node.dataset.id;
-          await loadSession(currentSessionId);
-          await loadSessions();
-        });
-      });
-    }
-
-    async function loadSessions() {
-      const sessions = await fetchJson("/api/sessions");
-      renderSessionList(sessions);
-      return sessions;
-    }
-
-    async function loadSession(sessionId) {
-      const session = await fetchJson(`/api/sessions/${sessionId}`);
-      renderMessages(session);
-      return session;
-    }
-
-    async function createSession() {
-      const session = await fetchJson("/api/sessions", { method: "POST", body: JSON.stringify({}) });
-      currentSessionId = session.session_id;
-      await loadSessions();
-      renderMessages(session);
-      return session;
-    }
-
-    async function sendPrompt() {
-      const prompt = document.getElementById("prompt").value.trim();
-      if (!prompt) {
-        return;
-      }
-      if (!currentSessionId) {
-        await createSession();
-      }
-      const payload = {
-        session_id: currentSessionId,
-        prompt,
-        generate: document.getElementById("generate").checked,
-        output_dir: document.getElementById("output-dir").value.trim() || "generated-output",
-        save_skill_name: document.getElementById("save-skill").value.trim() || null,
-      };
-      const response = await fetchJson("/api/chat", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      currentSessionId = response.session_id;
-      document.getElementById("prompt").value = "";
-      await loadSessions();
-      renderMessages(response.session);
-    }
-
-    function escapeHtml(value) {
-      return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;");
-    }
-
-    document.getElementById("new-session").addEventListener("click", async () => {
-      await createSession();
-    });
-    document.getElementById("refresh-sessions").addEventListener("click", async () => {
-      await loadSessions();
-    });
-    document.getElementById("send").addEventListener("click", async () => {
-      try {
-        await sendPrompt();
-      } catch (error) {
-        alert(error.message || String(error));
-      }
-    });
-
-    loadSessions().catch((error) => {
-      console.error(error);
-    });
-  </script>
+  <main>
+    <h1>DevMate backend is running.</h1>
+    <p>Use the React frontend at <code>http://127.0.0.1:5173</code> during local development.</p>
+    <p>The API base is this server, usually <code>http://127.0.0.1:8765</code>.</p>
+  </main>
 </body>
 </html>
 """
 
 
 class CreateSessionRequest(BaseModel):
-    """Create-session API payload."""
-
     title: str | None = None
 
 
 class ChatRequest(BaseModel):
-    """Chat API payload."""
-
     session_id: str | None = None
-    prompt: str = Field(min_length=1)
+    prompt: str | None = None
+    message: str | None = None
     generate: bool = True
     output_dir: str = "generated-output"
     save_skill_name: str | None = None
+
+    @model_validator(mode="after")
+    def validate_prompt(self) -> "ChatRequest":
+        if not (self.prompt or self.message):
+            raise ValueError("Either prompt or message is required.")
+        return self
+
+    @property
+    def effective_prompt(self) -> str:
+        return (self.message or self.prompt or "").strip()
 
 
 def create_app(
@@ -437,10 +71,10 @@ def create_app(
     runtime: DevMateRuntime | None = None,
     session_store: SessionStore | None = None,
 ) -> FastAPI:
-    """Create the local DevMate GUI app."""
     store = session_store or SessionStore(Path(".sessions"))
     active_runtime = runtime or DevMateRuntime(settings=settings, session_store=store)
-    app = FastAPI(title="DevMate UI")
+    skill_registry = active_runtime.skill_registry
+    app = FastAPI(title="DevMate API")
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
@@ -448,43 +82,286 @@ def create_app(
 
     @app.get("/api/sessions")
     async def list_sessions() -> list[dict[str, object]]:
-        return [asdict(item) for item in store.list_sessions()]
+        return [_session_summary_payload(item) for item in store.list_sessions()]
 
     @app.post("/api/sessions")
     async def create_session(payload: CreateSessionRequest) -> dict[str, object]:
         record = store.create_session(title=payload.title)
-        return asdict(record)
+        return _session_summary_payload(_summary_from_record(record))
 
     @app.get("/api/sessions/{session_id}")
     async def get_session(session_id: str) -> dict[str, object]:
-        record = store.get_session(session_id)
-        if record is None:
+        record = _get_session_or_404(store, session_id)
+        return _session_detail_payload(record)
+
+    @app.delete("/api/sessions/{session_id}", status_code=204)
+    async def delete_session(session_id: str) -> None:
+        path = store.sessions_dir / f"{session_id}.json"
+        if not path.exists():
             raise HTTPException(status_code=404, detail="Session not found.")
-        return asdict(record)
+        path.unlink()
 
     @app.post("/api/chat")
     async def chat(payload: ChatRequest) -> dict[str, object]:
-        session_id = payload.session_id
-        if not session_id:
-            session_id = store.create_session().session_id
+        prompt = payload.effective_prompt
+        session_id = payload.session_id or store.create_session().session_id
         result = active_runtime.handle_prompt(
-            payload.prompt,
+            prompt,
             save_skill_name=payload.save_skill_name,
             generate_output_dir=Path(payload.output_dir) if payload.generate else None,
             session_id=session_id,
         )
-        session = store.get_session(session_id)
-        if session is None:
-            raise HTTPException(status_code=500, detail="Session was not persisted.")
+        session = _get_session_or_404(store, session_id)
         return {
             "session_id": session_id,
             "result": asdict(result),
-            "session": asdict(session),
+            "message": _assistant_message_payload(session_id, session.turns[-1] if session.turns else None),
+            "session": _session_detail_payload(session),
         }
+
+    @app.get("/api/chat/stream")
+    async def chat_stream(
+        session_id: str,
+        message: str,
+        generate: bool = True,
+        output_dir: str = "generated-output",
+        save_skill_name: str | None = None,
+    ) -> StreamingResponse:
+        def event_stream():
+            for event in active_runtime.stream_prompt(
+                message,
+                save_skill_name=save_skill_name,
+                generate_output_dir=Path(output_dir) if generate else None,
+                session_id=session_id,
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
+    @app.get("/api/files/content")
+    async def get_file_content(
+        path: str = Query(...),
+        session_id: str | None = Query(None),
+    ) -> JSONResponse:
+        target = _resolve_file_path(store, path, session_id)
+        if target is None or not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail="File not found.")
+        return JSONResponse(content=target.read_text(encoding="utf-8"))
+
+    @app.get("/api/files/{session_id}")
+    async def get_files(session_id: str) -> list[dict[str, object]]:
+        record = _get_session_or_404(store, session_id)
+        turn = _latest_generation_turn(record)
+        if turn is None or not turn.generation_output_dir:
+            return []
+        output_dir = Path(turn.generation_output_dir)
+        if not output_dir.exists():
+            return []
+        status_map = {path: "new" for path in turn.generated_created_files}
+        status_map.update({path: "modified" for path in turn.generated_modified_files})
+        files: list[dict[str, object]] = []
+        for path in sorted(output_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(output_dir).as_posix()
+            files.append(
+                {
+                    "name": path.name,
+                    "path": relative,
+                    "type": "file",
+                    "status": status_map.get(relative),
+                    "size": path.stat().st_size,
+                }
+            )
+        return files
+
+    @app.get("/api/skills")
+    async def list_skills(search: str | None = None, type: str | None = None) -> list[dict[str, object]]:
+        del type
+        notes = skill_registry.search(search or "", limit=50) if search else skill_registry.list_skills()
+        return [_skill_payload(note) for note in notes]
+
+    @app.get("/api/skills/{skill_id}")
+    async def get_skill(skill_id: str) -> dict[str, object]:
+        note = skill_registry.load(skill_id)
+        if note is None:
+            raise HTTPException(status_code=404, detail="Skill not found.")
+        return _skill_payload(note)
+
+    @app.delete("/api/skills/{skill_id}", status_code=204)
+    async def delete_skill(skill_id: str) -> None:
+        note = skill_registry.load(skill_id)
+        if note is None or note.source_path is None:
+            raise HTTPException(status_code=404, detail="Skill not found.")
+        skill_path = Path(note.source_path)
+        skill_root = skill_path.parent
+        if skill_root.exists() and skill_root.is_dir() and skill_root.name != ".skills":
+            for nested in sorted(skill_root.rglob("*"), reverse=True):
+                if nested.is_file():
+                    nested.unlink()
+                elif nested.is_dir():
+                    nested.rmdir()
+            skill_root.rmdir()
 
     return app
 
 
+def _get_session_or_404(store: SessionStore, session_id: str) -> SessionRecord:
+    record = store.get_session(session_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return record
+
+
+def _summary_from_record(record: SessionRecord) -> SessionSummary:
+    return SessionSummary(
+        session_id=record.session_id,
+        title=record.title,
+        updated_at=record.updated_at,
+        turn_count=len(record.turns),
+    )
+
+
+def _session_summary_payload(item: SessionSummary) -> dict[str, object]:
+    return {
+        "id": item.session_id,
+        "session_id": item.session_id,
+        "title": item.title,
+        "created_at": item.updated_at,
+        "updated_at": item.updated_at,
+        "turn_count": item.turn_count,
+        "message_count": item.turn_count * 2,
+        "tags": [],
+    }
+
+
+def _assistant_message_payload(session_id: str, turn: SessionTurn | None) -> dict[str, object]:
+    if turn is None:
+        return {
+            "id": f"{session_id}-assistant-empty",
+            "session_id": session_id,
+            "role": "assistant",
+            "content": "",
+            "timestamp": "",
+            "status": "success",
+        }
+    search_results = [
+        {
+            "id": f"web-{index}",
+            "title": str(item.get("title", "")),
+            "content": str(item.get("snippet", "")),
+            "source": "web",
+            "score": float(item.get("score") or 0.6),
+            "url": str(item.get("url", "")) or None,
+        }
+        for index, item in enumerate(turn.web_results)
+    ]
+    generated_files = [
+        {
+            "name": Path(path).name,
+            "path": path,
+            "type": "file",
+            "status": "modified" if path in turn.generated_modified_files else "new",
+        }
+        for path in turn.generated_files
+    ]
+    return {
+        "id": f"{session_id}-{turn.turn_id}-assistant",
+        "session_id": session_id,
+        "role": "assistant",
+        "content": turn.assistant_summary,
+        "timestamp": turn.created_at,
+        "status": "error" if turn.agent_error else "success",
+        "metadata": {
+            "planning_steps": [
+                {
+                    "id": f"{turn.turn_id}-step-{index}",
+                    "title": f"Step {index}",
+                    "description": step,
+                    "status": "completed",
+                }
+                for index, step in enumerate(turn.implementation_steps, start=1)
+            ],
+            "search_results": search_results,
+            "generated_files": generated_files,
+        },
+    }
+
+
+def _session_detail_payload(record: SessionRecord) -> dict[str, object]:
+    messages: list[dict[str, Any]] = []
+    for turn in record.turns:
+        messages.append(
+            {
+                "id": f"{record.session_id}-{turn.turn_id}-user",
+                "session_id": record.session_id,
+                "role": "user",
+                "content": turn.prompt,
+                "timestamp": turn.created_at,
+                "status": "success",
+            }
+        )
+        messages.append(_assistant_message_payload(record.session_id, turn))
+    return {
+        "id": record.session_id,
+        "session_id": record.session_id,
+        "title": record.title,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+        "message_count": len(messages),
+        "tags": [],
+        "messages": messages,
+        "turns": [asdict(turn) for turn in record.turns],
+    }
+
+
+def _latest_generation_turn(record: SessionRecord) -> SessionTurn | None:
+    for turn in reversed(record.turns):
+        if turn.generation_output_dir or turn.generated_files:
+            return turn
+    return None
+
+
+def _resolve_file_path(store: SessionStore, path: str, session_id: str | None) -> Path | None:
+    candidate = Path(path)
+    if candidate.is_absolute():
+        return candidate
+    if session_id:
+        record = store.get_session(session_id)
+        if record is None:
+            return None
+        turn = _latest_generation_turn(record)
+        if turn is None or not turn.generation_output_dir:
+            return None
+        return Path(turn.generation_output_dir) / candidate
+    for session in store.list_sessions():
+        record = store.get_session(session.session_id)
+        if record is None:
+            continue
+        turn = _latest_generation_turn(record)
+        if turn is None or not turn.generation_output_dir:
+            continue
+        file_path = Path(turn.generation_output_dir) / candidate
+        if file_path.exists():
+            return file_path
+    return None
+
+
+def _skill_payload(note: Any) -> dict[str, object]:
+    return {
+        "id": note.slug or note.name,
+        "name": note.name,
+        "description": note.summary,
+        "keywords": note.keywords,
+        "usage_count": 0,
+        "last_used": "",
+        "steps": note.steps,
+    }
+
+
 def run_web_app(settings: AppSettings, *, host: str, port: int) -> None:
-    """Run the DevMate GUI locally."""
     uvicorn.run(create_app(settings), host=host, port=port)

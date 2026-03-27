@@ -1,0 +1,224 @@
+"""Tests for the local FastAPI web app."""
+
+from __future__ import annotations
+
+import json
+import shutil
+from pathlib import Path
+from uuid import uuid4
+
+from fastapi.testclient import TestClient
+
+from devmate.agent_runtime import PromptResult
+from devmate.config_loader import load_settings
+from devmate.session_store import SessionStore, SessionTurn
+from devmate.skill_registry import SkillRegistry
+from devmate.web_app import create_app
+
+
+WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+
+
+class FakeRuntime:
+    """Runtime stub used to exercise the FastAPI layer only."""
+
+    def __init__(self, skill_registry: SkillRegistry) -> None:
+        self.skill_registry = skill_registry
+
+    def handle_prompt(self, *args: object, **kwargs: object) -> PromptResult:
+        del args, kwargs
+        return PromptResult(
+            session_id=None,
+            summary="Stub summary",
+            planned_files=["index.html"],
+            implementation_steps=["Do the thing."],
+            retrieved_sources=[],
+            matched_skills=[],
+            web_results=[],
+            web_search_attempted=False,
+            agent_used_model=False,
+        )
+
+    def stream_prompt(self, *args: object, **kwargs: object):
+        del args, kwargs
+        yield {
+            "type": "planning",
+            "step": {
+                "id": "planning",
+                "title": "Draft plan",
+                "description": "Planning in progress",
+                "status": "running",
+            },
+        }
+        yield {
+            "type": "search",
+            "results": [
+                {
+                    "id": "local-guide",
+                    "title": "Guide",
+                    "content": "Useful local doc",
+                    "source": "local",
+                    "score": 0.9,
+                }
+            ],
+        }
+        yield {
+            "type": "file",
+            "file": {
+                "name": "main.js",
+                "path": "js/main.js",
+                "type": "file",
+                "status": "new",
+            },
+        }
+        yield {"type": "content", "content": "Hello "}
+        yield {"type": "content", "content": "world"}
+        yield {"type": "complete", "summary": "Completed stream."}
+
+
+def _make_test_root() -> Path:
+    root = WORKSPACE_ROOT / "test_scratch" / uuid4().hex
+    root.mkdir(parents=True, exist_ok=False)
+    return root
+
+
+def _write_config(path: Path, *, docs_dir: Path, skills_dir: Path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "[app]",
+                'project_name = "DevMate"',
+                f'docs_dir = "{docs_dir.as_posix()}"',
+                'log_level = "INFO"',
+                "",
+                "[model]",
+                'ai_base_url = "https://api.minimaxi.com/v1"',
+                'api_key = "test"',
+                'model_name = "MiniMax-M2"',
+                'embedding_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"',
+                'embedding_api_key = "test"',
+                'embedding_model_name = "text-embedding-v4"',
+                "",
+                "[search]",
+                'tavily_api_key = "test"',
+                "default_max_results = 5",
+                "request_timeout_seconds = 20.0",
+                "",
+                "[mcp]",
+                'server_url = "http://localhost:8001/mcp"',
+                'transport = "streamable_http"',
+                "tool_timeout_seconds = 30.0",
+                "healthcheck_timeout_seconds = 5.0",
+                "",
+                "[rag]",
+                'provider = "chromadb"',
+                'collection_name = "devmate-docs"',
+                f'persist_directory = "{(docs_dir.parent / ".chroma" / "test-web").as_posix()}"',
+                "chunk_size = 400",
+                "chunk_overlap = 40",
+                "top_k = 4",
+                "",
+                "[langsmith]",
+                "langchain_tracing_v2 = true",
+                'langchain_api_key = "test"',
+                "",
+                "[skills]",
+                f'skills_dir = "{skills_dir.as_posix()}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_chat_stream_emits_incremental_events() -> None:
+    root = _make_test_root()
+    try:
+        docs_dir = root / "docs"
+        skills_dir = root / ".skills"
+        docs_dir.mkdir()
+        skills_dir.mkdir()
+        config_path = root / "config.toml"
+        _write_config(config_path, docs_dir=docs_dir, skills_dir=skills_dir)
+        settings = load_settings(config_path)
+        store = SessionStore(root / ".sessions")
+        runtime = FakeRuntime(SkillRegistry(skills_dir))
+        app = create_app(settings, runtime=runtime, session_store=store)
+        client = TestClient(app)
+
+        session = client.post("/api/sessions", json={"title": "Stream Demo"}).json()
+        session_id = session["id"]
+        response = client.get(
+            "/api/chat/stream",
+            params={"session_id": session_id, "message": "stream this"},
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert response.status_code == 200
+    events = [
+        json.loads(chunk.removeprefix("data: "))
+        for chunk in response.text.split("\n\n")
+        if chunk.startswith("data: ")
+    ]
+    assert [event["type"] for event in events] == [
+        "planning",
+        "search",
+        "file",
+        "content",
+        "content",
+        "complete",
+    ]
+    assert events[-1]["summary"] == "Completed stream."
+
+
+def test_file_endpoints_return_generated_content() -> None:
+    root = _make_test_root()
+    try:
+        docs_dir = root / "docs"
+        skills_dir = root / ".skills"
+        docs_dir.mkdir()
+        skills_dir.mkdir()
+        config_path = root / "config.toml"
+        _write_config(config_path, docs_dir=docs_dir, skills_dir=skills_dir)
+        settings = load_settings(config_path)
+        store = SessionStore(root / ".sessions")
+        runtime = FakeRuntime(SkillRegistry(skills_dir))
+        session = store.create_session("Files Demo")
+        output_dir = root / "generated-output" / "flappy-demo"
+        (output_dir / "js").mkdir(parents=True, exist_ok=True)
+        (output_dir / "index.html").write_text("<!DOCTYPE html><title>Game</title>", encoding="utf-8")
+        (output_dir / "js" / "main.js").write_text(
+            "import { mountFlappyBird } from './game.js';",
+            encoding="utf-8",
+        )
+        store.append_turn(
+            session.session_id,
+            SessionTurn(
+                turn_id="files-demo",
+                created_at="2026-03-27T00:00:00+00:00",
+                prompt="build a flappy bird web game",
+                assistant_summary="Created browser game files.",
+                planned_files=["index.html", "js/main.js"],
+                implementation_steps=["Create HTML", "Create JS"],
+                generation_output_dir=str(output_dir.resolve()),
+                generated_files=["index.html", "js/main.js"],
+                generated_created_files=["index.html", "js/main.js"],
+            ),
+        )
+        app = create_app(settings, runtime=runtime, session_store=store)
+        client = TestClient(app)
+
+        files_response = client.get(f"/api/files/{session.session_id}")
+        content_response = client.get(
+            "/api/files/content",
+            params={"path": "js/main.js", "session_id": session.session_id},
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert files_response.status_code == 200
+    paths = [item["path"] for item in files_response.json()]
+    assert paths == ["index.html", "js/main.js"]
+    assert content_response.status_code == 200
+    assert "mountFlappyBird" in content_response.json()

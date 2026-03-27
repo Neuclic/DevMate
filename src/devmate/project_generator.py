@@ -1,9 +1,10 @@
-"""Generate project files from an implementation plan."""
+﻿"""Generate project files from an implementation plan."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from langchain_openai import ChatOpenAI
@@ -39,34 +40,46 @@ class ProjectGenerator:
         self.settings = settings
         self._model = model
 
+    def normalize_plan(self, prompt: str, plan: AgentPlan) -> AgentPlan:
+        """Expand weak single-file plans into runnable starter projects."""
+        mode = self._infer_mode(prompt, plan.planned_files)
+        planned_files = self._normalized_files(mode, plan.planned_files)
+        implementation_steps = self._normalized_steps(mode, plan.implementation_steps)
+        return replace(plan, planned_files=planned_files, implementation_steps=implementation_steps)
+
     @traceable(run_type="chain", name="generate_project_files")
     def generate_project(
         self,
         prompt: str,
         plan: AgentPlan,
         output_dir: Path,
+        *,
+        on_file_written: Callable[[GeneratedFile], None] | None = None,
     ) -> GenerationResult:
         """Write the generated project files to disk."""
+        normalized_plan = self.normalize_plan(prompt, plan)
         generated_files: list[GeneratedFile]
         used_model = False
         model_error: str | None = None
-        existing_files = self._load_existing_files(output_dir, plan)
+        existing_files = self._load_existing_files(output_dir, normalized_plan)
 
         if self._model_is_configured():
             try:
-                generated_files = self._generate_with_model(prompt, plan, existing_files)
+                generated_files = self._generate_with_model(prompt, normalized_plan, existing_files)
                 used_model = True
             except Exception as exc:
                 model_error = str(exc)
-                generated_files = self._generate_with_templates(prompt, plan, existing_files)
+                generated_files = self._generate_with_templates(prompt, normalized_plan, existing_files)
         else:
-            generated_files = self._generate_with_templates(prompt, plan, existing_files)
+            generated_files = self._generate_with_templates(prompt, normalized_plan, existing_files)
 
         output_dir.mkdir(parents=True, exist_ok=True)
         for item in generated_files:
             target = output_dir / item.path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(item.content.rstrip() + "\n", encoding="utf-8")
+            if on_file_written is not None:
+                on_file_written(item)
 
         return GenerationResult(
             output_dir=str(output_dir.resolve()),
@@ -91,7 +104,8 @@ class ProjectGenerator:
                         "{\"files\": [{\"path\": \"...\", \"content\": \"...\"}]}. "
                         "Every file path must be repo-relative and match the requested plan. "
                         "Prefer concise but complete starter code. "
-                        "If an existing file is provided, update it in place instead of rewriting the project from scratch."
+                        "If an existing file is provided, update it in place instead of rewriting the project from scratch. "
+                        "When the request is for a browser game or static website, include HTML, CSS, and JavaScript files."
                     ),
                 },
                 {
@@ -233,6 +247,81 @@ class ProjectGenerator:
                 existing[relative_path] = target.read_text(encoding="utf-8")
         return existing
 
+    @classmethod
+    def _infer_mode(cls, prompt: str, planned_files: list[str]) -> str:
+        lowered = prompt.lower()
+        joined_files = " ".join(path.lower() for path in planned_files)
+        if any(token in lowered for token in {"flappy", "game", "arcade", "canvas", "bird"}):
+            return "browser_game"
+        if any(token in lowered for token in {"map", "trail", "hiking", "leaflet", "mapbox"}):
+            return "map_site"
+        if any(token in lowered for token in {"website", "web site", "landing page", "static site", "web app"}) or "index.html" in joined_files:
+            return "static_site"
+        return "generic"
+
+    @staticmethod
+    def _required_files(mode: str) -> list[str]:
+        if mode == "browser_game":
+            return ["index.html", "styles.css", "js/main.js", "js/game.js", "README.md"]
+        if mode == "map_site":
+            return ["index.html", "css/styles.css", "js/app.js", "README.md"]
+        if mode == "static_site":
+            return ["index.html", "styles.css", "js/app.js", "README.md"]
+        return []
+
+    @classmethod
+    def _normalized_files(cls, mode: str, planned_files: list[str]) -> list[str]:
+        files = [path.replace("\\", "/") for path in planned_files if path.strip()]
+        required_files = cls._required_files(mode)
+        if mode in {"browser_game", "static_site", "map_site"} and cls._has_web_scaffold(files):
+            required_files = [path for path in required_files if path.lower().endswith("readme.md")]
+        for required in required_files:
+            if required not in files:
+                files.append(required)
+        deduped: list[str] = []
+        for path in files:
+            if path not in deduped:
+                deduped.append(path)
+        return deduped
+
+    @staticmethod
+    def _has_web_scaffold(planned_files: list[str]) -> bool:
+        lowered = [path.lower() for path in planned_files]
+        has_html = any(path.endswith(".html") for path in lowered)
+        has_css = any(path.endswith(".css") for path in lowered)
+        has_js = any(path.endswith(".js") for path in lowered)
+        return has_html and has_css and has_js
+
+    @staticmethod
+    def _normalized_steps(mode: str, implementation_steps: list[str]) -> list[str]:
+        steps = [step.strip() for step in implementation_steps if step.strip()]
+        defaults: list[str] = []
+        if mode == "browser_game":
+            defaults = [
+                "Build the game shell with a scoreboard, status text, and a canvas scene.",
+                "Implement the Flappy Bird gameplay loop, gravity, pipe spawning, and collision detection in JavaScript.",
+                "Wire user input, restart behavior, and render updates so the game is playable immediately in the browser.",
+                "Add styling and a short README explaining how to run the game locally.",
+            ]
+        elif mode == "static_site":
+            defaults = [
+                "Create the page structure and content sections in HTML.",
+                "Add CSS for layout, spacing, and visual hierarchy.",
+                "Implement JavaScript for page behavior and interactions.",
+                "Document how to run and customize the generated site.",
+            ]
+        elif mode == "map_site":
+            defaults = [
+                "Create the responsive page shell and map container.",
+                "Implement the map bootstrap and marker rendering logic.",
+                "Add supporting UI content and trail cards around the map experience.",
+                "Document how to run the generated site locally.",
+            ]
+        for step in defaults:
+            if step not in steps:
+                steps.append(step)
+        return steps[:6]
+
     @staticmethod
     def _template_for_path(
         path: str,
@@ -242,6 +331,7 @@ class ProjectGenerator:
     ) -> str:
         normalized = path.replace("\\", "/").lower()
         is_leaflet = "leaflet" in prompt.lower()
+        mode = ProjectGenerator._infer_mode(prompt, plan.planned_files)
         if existing_content is not None:
             return ProjectGenerator._update_existing_content(
                 path=path,
@@ -249,6 +339,16 @@ class ProjectGenerator:
                 plan=plan,
                 existing_content=existing_content,
             )
+
+        if mode == "browser_game":
+            game_template = ProjectGenerator._browser_game_template(normalized, prompt)
+            if game_template is not None:
+                return game_template
+
+        if mode == "static_site" and mode != "map_site":
+            static_template = ProjectGenerator._static_site_template(normalized, prompt)
+            if static_template is not None:
+                return static_template
 
         if normalized.endswith("index.html"):
             map_css = (
@@ -478,6 +578,190 @@ class ProjectGenerator:
         return f"Generated placeholder for {path}\n"
 
     @staticmethod
+    def _browser_game_template(normalized: str, prompt: str) -> str | None:
+        if normalized.endswith("index.html"):
+            return (
+                "<!DOCTYPE html>\n"
+                "<html lang=\"en\">\n"
+                "<head>\n"
+                "  <meta charset=\"UTF-8\" />\n"
+                "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n"
+                "  <title>Flappy Bird Clone</title>\n"
+                "  <link rel=\"stylesheet\" href=\"styles.css\" />\n"
+                "</head>\n"
+                "<body>\n"
+                "  <main class=\"game-shell\">\n"
+                "    <section class=\"hero\">\n"
+                "      <p class=\"eyebrow\">DevMate Browser Game</p>\n"
+                "      <h1>Flappy Bird Clone</h1>\n"
+                f"      <p class=\"lede\">Generated from prompt: {prompt}</p>\n"
+                "    </section>\n"
+                "    <section class=\"game-layout\">\n"
+                "      <div class=\"hud\">\n"
+                "        <div><span>Score</span><strong id=\"score\">0</strong></div>\n"
+                "        <div><span>Best</span><strong id=\"best-score\">0</strong></div>\n"
+                "        <button id=\"start-button\" type=\"button\">Start / Restart</button>\n"
+                "      </div>\n"
+                "      <canvas id=\"game-canvas\" width=\"420\" height=\"640\" aria-label=\"Flappy Bird game canvas\"></canvas>\n"
+                "      <p id=\"status\" class=\"status\">Press Start or hit Space to flap.</p>\n"
+                "    </section>\n"
+                "  </main>\n"
+                "  <script type=\"module\" src=\"js/main.js\"></script>\n"
+                "</body>\n"
+                "</html>"
+            )
+        if normalized.endswith("styles.css"):
+            return (
+                ":root {\n"
+                "  --sky: #d8f0ff;\n"
+                "  --sky-deep: #9dd8ff;\n"
+                "  --ground: #f0d082;\n"
+                "  --ink: #142338;\n"
+                "  --panel: rgba(255, 255, 255, 0.82);\n"
+                "  --accent: #ff7a18;\n"
+                "}\n\n"
+                "* { box-sizing: border-box; }\n"
+                "body { margin: 0; min-height: 100vh; font-family: 'Segoe UI', sans-serif; color: var(--ink); background: linear-gradient(180deg, var(--sky), var(--sky-deep)); }\n"
+                ".game-shell { max-width: 980px; margin: 0 auto; padding: 2rem 1rem 3rem; }\n"
+                ".hero { margin-bottom: 1.5rem; }\n"
+                ".eyebrow { margin: 0 0 0.5rem; text-transform: uppercase; letter-spacing: 0.18em; font-size: 0.82rem; color: #0d5d86; }\n"
+                ".hero h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.8rem); }\n"
+                ".lede { max-width: 44rem; color: rgba(20, 35, 56, 0.8); }\n"
+                ".game-layout { display: grid; gap: 1rem; }\n"
+                ".hud { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; padding: 1rem 1.2rem; border-radius: 20px; background: var(--panel); box-shadow: 0 18px 40px rgba(20, 35, 56, 0.12); }\n"
+                ".hud div { display: grid; gap: 0.15rem; min-width: 90px; }\n"
+                ".hud span { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.12em; color: rgba(20, 35, 56, 0.6); }\n"
+                ".hud strong { font-size: 1.6rem; }\n"
+                ".hud button { margin-left: auto; border: 0; border-radius: 999px; padding: 0.85rem 1.25rem; font-weight: 700; background: var(--accent); color: white; cursor: pointer; }\n"
+                "#game-canvas { width: min(100%, 420px); justify-self: center; border-radius: 28px; background: linear-gradient(180deg, #7fd2ff, #c5f4ff 75%); box-shadow: 0 20px 50px rgba(20, 35, 56, 0.18); }\n"
+                ".status { margin: 0; text-align: center; font-weight: 600; }\n"
+            )
+        if normalized.endswith("js/main.js"):
+            return (
+                "import { mountFlappyBird } from './game.js';\n\n"
+                "const canvas = document.getElementById('game-canvas');\n"
+                "const score = document.getElementById('score');\n"
+                "const bestScore = document.getElementById('best-score');\n"
+                "const status = document.getElementById('status');\n"
+                "const startButton = document.getElementById('start-button');\n\n"
+                "if (!(canvas instanceof HTMLCanvasElement) || !score || !bestScore || !status || !(startButton instanceof HTMLButtonElement)) {\n"
+                "  throw new Error('Game UI failed to initialize.');\n"
+                "}\n\n"
+                "mountFlappyBird({ canvas, scoreEl: score, bestEl: bestScore, statusEl: status, startButton });\n"
+            )
+        if normalized.endswith("js/game.js"):
+            return (
+                "const PIPE_WIDTH = 72;\n"
+                "const PIPE_GAP = 160;\n"
+                "const PIPE_SPEED = 160;\n"
+                "const GRAVITY = 1400;\n"
+                "const FLAP_VELOCITY = -420;\n"
+                "const PIPE_INTERVAL = 1.35;\n\n"
+                "function randomBetween(min, max) {\n"
+                "  return Math.random() * (max - min) + min;\n"
+                "}\n\n"
+                "export function mountFlappyBird({ canvas, scoreEl, bestEl, statusEl, startButton }) {\n"
+                "  const ctx = canvas.getContext('2d');\n"
+                "  if (!ctx) throw new Error('Canvas 2D context unavailable.');\n"
+                "  let animationFrame = 0;\n"
+                "  let lastTime = 0;\n"
+                "  let accumulator = 0;\n"
+                "  let running = false;\n"
+                "  let score = 0;\n"
+                "  let best = Number(localStorage.getItem('devmate-flappy-best') || '0');\n"
+                "  let bird = { x: 110, y: canvas.height / 2, velocityY: 0, radius: 18, rotation: 0 };\n"
+                "  let pipes = [];\n"
+                "  function reset() { score = 0; accumulator = 0; bird = { x: 110, y: canvas.height / 2, velocityY: 0, radius: 18, rotation: 0 }; pipes = []; scoreEl.textContent = '0'; bestEl.textContent = String(best); statusEl.textContent = 'Tap Space, click, or touch to keep flying.'; }\n"
+                "  function spawnPipe() { const gapTop = randomBetween(120, canvas.height - 220); pipes.push({ x: canvas.width + PIPE_WIDTH, gapTop, passed: false }); }\n"
+                "  function flap() { if (!running) { start(); return; } bird.velocityY = FLAP_VELOCITY; }\n"
+                "  function collide(pipe) { const withinX = bird.x + bird.radius > pipe.x && bird.x - bird.radius < pipe.x + PIPE_WIDTH; const hitsTop = bird.y - bird.radius < pipe.gapTop; const hitsBottom = bird.y + bird.radius > pipe.gapTop + PIPE_GAP; return withinX && (hitsTop || hitsBottom); }\n"
+                "  function update(delta) { bird.velocityY += GRAVITY * delta; bird.y += bird.velocityY * delta; bird.rotation = Math.max(-0.6, Math.min(1.2, bird.velocityY / 500)); accumulator += delta; if (accumulator >= PIPE_INTERVAL) { accumulator = 0; spawnPipe(); } pipes = pipes.map((pipe) => ({ ...pipe, x: pipe.x - PIPE_SPEED * delta })).filter((pipe) => pipe.x + PIPE_WIDTH > -20); for (const pipe of pipes) { if (!pipe.passed && pipe.x + PIPE_WIDTH < bird.x) { pipe.passed = true; score += 1; scoreEl.textContent = String(score); } if (collide(pipe)) { gameOver(); } } if (bird.y + bird.radius >= canvas.height - 40 || bird.y - bird.radius <= 0) { gameOver(); } }\n"
+                "  function draw() { const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height); gradient.addColorStop(0, '#7fd2ff'); gradient.addColorStop(1, '#d7f6ff'); ctx.fillStyle = gradient; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.fillStyle = '#e7c77a'; ctx.fillRect(0, canvas.height - 40, canvas.width, 40); ctx.fillStyle = '#2f9954'; pipes.forEach((pipe) => { ctx.fillRect(pipe.x, 0, PIPE_WIDTH, pipe.gapTop); ctx.fillRect(pipe.x, pipe.gapTop + PIPE_GAP, PIPE_WIDTH, canvas.height - pipe.gapTop - PIPE_GAP); }); ctx.save(); ctx.translate(bird.x, bird.y); ctx.rotate(bird.rotation); ctx.fillStyle = '#ffb11b'; ctx.beginPath(); ctx.arc(0, 0, bird.radius, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = '#142338'; ctx.beginPath(); ctx.arc(7, -5, 3.5, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = '#ff7a18'; ctx.beginPath(); ctx.moveTo(14, 2); ctx.lineTo(28, 0); ctx.lineTo(14, -4); ctx.closePath(); ctx.fill(); ctx.restore(); }\n"
+                "  function frame(time) { if (!running) return; if (!lastTime) lastTime = time; const delta = Math.min((time - lastTime) / 1000, 0.032); lastTime = time; update(delta); draw(); animationFrame = window.requestAnimationFrame(frame); }\n"
+                "  function start() { window.cancelAnimationFrame(animationFrame); lastTime = 0; running = true; reset(); spawnPipe(); bird.velocityY = FLAP_VELOCITY; animationFrame = window.requestAnimationFrame(frame); }\n"
+                "  function gameOver() { if (!running) return; running = false; window.cancelAnimationFrame(animationFrame); best = Math.max(best, score); localStorage.setItem('devmate-flappy-best', String(best)); bestEl.textContent = String(best); statusEl.textContent = `Game over. Final score: ${score}. Press Start or Space to play again.`; draw(); }\n"
+                "  startButton.addEventListener('click', start);\n"
+                "  window.addEventListener('keydown', (event) => { if (event.code === 'Space') { event.preventDefault(); flap(); } });\n"
+                "  canvas.addEventListener('pointerdown', flap);\n"
+                "  bestEl.textContent = String(best);\n"
+                "  draw();\n"
+                "}\n"
+            )
+        if normalized.endswith("readme.md"):
+            return (
+                "# Flappy Bird Web Game\n\n"
+                "A small browser game scaffold generated by DevMate.\n\n"
+                "## Run\n\n"
+                "1. Open `index.html` in a browser, or serve the folder with a static file server.\n"
+                "2. Click **Start / Restart** or press the space bar to flap.\n"
+                "3. Avoid the pipes and keep increasing your score.\n"
+            )
+        return None
+
+    @staticmethod
+    def _static_site_template(normalized: str, prompt: str) -> str | None:
+        if normalized.endswith("index.html"):
+            return (
+                "<!DOCTYPE html>\n"
+                "<html lang=\"en\">\n"
+                "<head>\n"
+                "  <meta charset=\"UTF-8\" />\n"
+                "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n"
+                "  <title>DevMate Site</title>\n"
+                "  <link rel=\"stylesheet\" href=\"styles.css\" />\n"
+                "</head>\n"
+                "<body>\n"
+                "  <main class=\"shell\">\n"
+                "    <section class=\"hero\">\n"
+                "      <p class=\"eyebrow\">Generated by DevMate</p>\n"
+                "      <h1>Static Web Experience</h1>\n"
+                f"      <p>{prompt}</p>\n"
+                "      <button id=\"cta\" type=\"button\">Explore</button>\n"
+                "    </section>\n"
+                "    <section class=\"grid\" id=\"feature-grid\"></section>\n"
+                "  </main>\n"
+                "  <script type=\"module\" src=\"js/app.js\"></script>\n"
+                "</body>\n"
+                "</html>"
+            )
+        if normalized.endswith("styles.css"):
+            return (
+                "body { margin: 0; min-height: 100vh; font-family: 'Segoe UI', sans-serif; background: linear-gradient(180deg, #f7fafc, #ffffff); color: #0f172a; }\n"
+                ".shell { max-width: 1100px; margin: 0 auto; padding: 2rem 1rem 3rem; }\n"
+                ".hero { padding: 2rem; border-radius: 24px; background: radial-gradient(circle at top left, rgba(59,130,246,0.14), transparent 35%), white; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }\n"
+                ".eyebrow { text-transform: uppercase; letter-spacing: 0.15em; color: #3b82f6; }\n"
+                ".grid { display: grid; gap: 1rem; margin-top: 1.25rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }\n"
+                ".card { border-radius: 18px; padding: 1.2rem; background: white; border: 1px solid #dbe4ef; }\n"
+                "button { border: 0; border-radius: 999px; padding: 0.8rem 1.15rem; background: #3b82f6; color: white; font-weight: 700; cursor: pointer; }\n"
+            )
+        if normalized.endswith("js/app.js"):
+            return (
+                "const features = [\n"
+                "  { title: 'Intentional layout', description: 'A clear content hierarchy and reusable sections.' },\n"
+                "  { title: 'Interactive behavior', description: 'A starter button interaction and dynamic content render.' },\n"
+                "  { title: 'Fast iteration', description: 'Simple files that are easy to extend after generation.' },\n"
+                "];\n\n"
+                "const grid = document.getElementById('feature-grid');\n"
+                "const cta = document.getElementById('cta');\n"
+                "if (grid) {\n"
+                "  features.forEach((feature) => {\n"
+                "    const card = document.createElement('article');\n"
+                "    card.className = 'card';\n"
+                "    card.innerHTML = `<h2>${feature.title}</h2><p>${feature.description}</p>`;\n"
+                "    grid.appendChild(card);\n"
+                "  });\n"
+                "}\n"
+                "cta?.addEventListener('click', () => {\n"
+                "  cta.textContent = 'Ready to build';\n"
+                "});\n"
+            )
+        if normalized.endswith("readme.md"):
+            return (
+                "# Static Site\n\n"
+                "Open `index.html` directly in a browser, or serve the folder with a small static server.\n"
+            )
+        return None
+    @staticmethod
     def _update_existing_content(
         *,
         path: str,
@@ -520,3 +804,5 @@ class ProjectGenerator:
             update_line = f"{comment_prefix} Generated from prompt: {prompt}"
 
         return existing_content.rstrip() + "\n\n" + update_line + "\n"
+
+

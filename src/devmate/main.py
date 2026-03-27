@@ -5,7 +5,12 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 import logging
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
 
 from devmate.agent_runtime import DevMateRuntime
 from devmate.config_loader import AppSettings
@@ -106,6 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the local MCP server using the configured Streamable HTTP endpoint.",
     )
     parser.add_argument(
+        "--serve-stack",
+        action="store_true",
+        help="Run MCP, the backend web API, and the frontend dev server together.",
+    )
+    parser.add_argument(
         "--serve-web",
         action="store_true",
         help="Run the local DevMate web UI.",
@@ -168,6 +178,124 @@ def resolve_sessions_dir() -> Path:
     return Path.cwd() / ".sessions"
 
 
+def resolve_frontend_dir() -> Path:
+    """Resolve the local frontend workspace."""
+    return Path.cwd() / "frontend"
+
+
+def resolve_pnpm_command() -> list[str]:
+    """Resolve the best available pnpm executable for the local frontend."""
+    pnpm_path = shutil.which("pnpm")
+    if pnpm_path:
+        if os.name == "nt":
+            return ["cmd", "/c", pnpm_path]
+        return [pnpm_path]
+
+    windows_fallback = Path.home() / "AppData" / "Roaming" / "npm" / "pnpm.cmd"
+    if windows_fallback.exists():
+        return ["cmd", "/c", str(windows_fallback)]
+
+    if os.name == "nt":
+        return ["cmd", "/c", "pnpm"]
+    return ["pnpm"]
+
+
+def serve_local_stack(
+    *,
+    config_path: Path,
+    log_level: str,
+    web_host: str,
+    web_port: int,
+) -> int:
+    """Run MCP, backend API, and frontend dev server together until interrupted."""
+    frontend_dir = resolve_frontend_dir()
+    if not frontend_dir.exists():
+        raise FileNotFoundError(f"Frontend workspace not found: {frontend_dir}")
+
+    env = os.environ.copy()
+    processes: list[tuple[str, subprocess.Popen[bytes]]] = []
+    commands: list[tuple[str, list[str], Path]] = [
+        (
+            "MCP server",
+            [
+                sys.executable,
+                "-m",
+                "devmate",
+                "--config",
+                str(config_path),
+                "--log-level",
+                log_level,
+                "--serve-mcp",
+            ],
+            Path.cwd(),
+        ),
+        (
+            "Web API",
+            [
+                sys.executable,
+                "-m",
+                "devmate",
+                "--config",
+                str(config_path),
+                "--log-level",
+                log_level,
+                "--serve-web",
+                "--web-host",
+                web_host,
+                "--web-port",
+                str(web_port),
+            ],
+            Path.cwd(),
+        ),
+        (
+            "Frontend",
+            [*resolve_pnpm_command(), "dev"],
+            frontend_dir,
+        ),
+    ]
+
+    try:
+        for name, command, workdir in commands:
+            LOGGER.info("Starting %s in %s", name, workdir)
+            processes.append(
+                (
+                    name,
+                    subprocess.Popen(
+                        command,
+                        cwd=str(workdir),
+                        env=env,
+                    ),
+                )
+            )
+
+        LOGGER.info("Local stack is starting.")
+        LOGGER.info("MCP health: http://localhost:8001/health")
+        LOGGER.info("Web API: http://%s:%d", web_host, web_port)
+        LOGGER.info("Frontend: http://127.0.0.1:5173")
+        LOGGER.info("Press Ctrl+C to stop all three services.")
+
+        while True:
+            for name, process in processes:
+                return_code = process.poll()
+                if return_code is not None:
+                    LOGGER.warning("%s exited with code %d. Stopping the remaining services.", name, return_code)
+                    return return_code
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        LOGGER.info("Stopping local stack.")
+        return 0
+    finally:
+        for _, process in reversed(processes):
+            if process.poll() is None:
+                process.terminate()
+        for _, process in reversed(processes):
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+
+
 def main() -> int:
     """Run the CLI application."""
     parser = build_parser()
@@ -206,6 +334,14 @@ def main() -> int:
     if args.serve_mcp:
         run_mcp_server(settings)
         return 0
+
+    if args.serve_stack:
+        return serve_local_stack(
+            config_path=Path(args.config),
+            log_level=args.log_level,
+            web_host=args.web_host,
+            web_port=args.web_port,
+        )
 
     if args.serve_web:
         LOGGER.info(

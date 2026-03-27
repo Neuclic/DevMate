@@ -110,6 +110,15 @@ def test_build_parser_parses_trace_arguments() -> None:
     assert args.share_trace is True
 
 
+def test_build_parser_parses_serve_stack_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["--serve-stack", "--web-port", "8876"])
+
+    assert args.serve_stack is True
+    assert args.web_port == 8876
+
+
 def test_resolve_rag_manifest_path_uses_docs_parent_for_relative_paths() -> None:
     manifest_path = resolve_rag_manifest_path(_settings())
 

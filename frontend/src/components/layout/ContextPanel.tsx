@@ -61,7 +61,7 @@ export function ContextPanel() {
             <SearchResults results={searchResults} />
           </TabsContent>
           <TabsContent className="min-h-0 flex-1 overflow-y-auto" value="files">
-            <FileTree files={generatedFiles} />
+            <FileTree files={generatedFiles} sessionId={selectedSessionId} />
           </TabsContent>
           <TabsContent className="min-h-0 flex-1 overflow-y-auto" value="skills">
             <div className="space-y-3 pt-2">

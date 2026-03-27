@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 try:
@@ -117,13 +118,23 @@ def _merge_dicts(
     return merged
 
 
+def _expand_env_vars(value: object) -> object:
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    if isinstance(value, dict):
+        return {key: _expand_env_vars(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_vars(item) for item in value]
+    return value
+
+
 def _read_merged_toml(path: Path) -> dict[str, object]:
     base = _read_toml(path)
     local_override_path = path.with_name(f"{path.stem}.local{path.suffix}")
     if local_override_path.exists():
         overrides = _read_toml(local_override_path)
-        return _merge_dicts(base, overrides)
-    return base
+        return _expand_env_vars(_merge_dicts(base, overrides))
+    return _expand_env_vars(base)
 
 
 def load_settings(path: Path) -> AppSettings:

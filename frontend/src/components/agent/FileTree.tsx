@@ -1,5 +1,6 @@
 ﻿import { FileCode2, FolderOpen, Download, Copy } from "lucide-react";
 import { lazy, Suspense, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 
 import { apiClient } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,7 @@ const MonacoEditor = lazy(async () => {
 
 interface FileTreeProps {
   files: FileNode[];
+  sessionId?: string | null;
 }
 
 function buildTree(files: FileNode[]): FileNode[] {
@@ -92,22 +94,30 @@ function FileNodeItem({ node, onOpen }: { node: FileNode; onOpen: (node: FileNod
   );
 }
 
-export function FileTree({ files }: FileTreeProps) {
-  const tree = useMemo(() => buildTree(files), [files]);
+export function FileTree({ files, sessionId }: FileTreeProps) {
+  const serverFilesQuery = useQuery({
+    queryKey: ["session-files", sessionId],
+    queryFn: () => apiClient.getFiles(sessionId!),
+    enabled: Boolean(sessionId),
+  });
+  const resolvedFiles = serverFilesQuery.data && serverFilesQuery.data.length > 0
+    ? serverFilesQuery.data
+    : files;
+  const tree = useMemo(() => buildTree(resolvedFiles), [resolvedFiles]);
   const [activeFile, setActiveFile] = useState<FileNode | null>(null);
   const [content, setContent] = useState("文件内容预览将在这里显示。");
 
   const openFile = async (node: FileNode) => {
     setActiveFile(node);
     try {
-      const value = await apiClient.getFileContent(node.path);
-      setContent(value || `当前后端没有返回 ${node.path} 的内容。`);
+      const value = await apiClient.getFileContent(node.path, sessionId ?? undefined);
+      setContent(value || `后端返回了空内容：${node.path}`);
     } catch {
-      setContent(`当前后端尚未暴露 /api/files/content，先只展示文件路径：\n\n${node.path}`);
+      setContent(`当前后端没有返回 ${node.path} 的文件内容。`);
     }
   };
 
-  if (files.length === 0) {
+  if (resolvedFiles.length === 0) {
     return (
       <p className="rounded-xl border border-dashed border-border px-3 py-6 text-sm text-muted-foreground">
         生成或修改文件后，这里会展示树形结构。

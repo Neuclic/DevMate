@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from devmate.config_loader import AppSettings
 from devmate.mcp_client import SearchMcpClient, SearchResult
 from devmate.rag_pipeline import KnowledgeBasePipeline, KnowledgeSnippet
+from devmate.search_policy import should_search_web
 from devmate.session_store import ConversationTurn
 from devmate.skill_registry import SkillNote, SkillRegistry
 
@@ -308,6 +309,10 @@ class PlanningAgent:
                 capture.web_search_error = str(exc)
                 return f"Web search unavailable: {exc}"
             capture.web_results = response.results
+            if response.error:
+                capture.web_search_error = response.error
+                if not response.results:
+                    return f"Web search unavailable: {response.error}"
             if not response.results:
                 return "Web search returned no results."
             return self._format_web_results(response.results)
@@ -528,6 +533,7 @@ class PlanningAgent:
                     max_results=self.settings.search.default_max_results,
                 )
                 capture.web_results = response.results
+                capture.web_search_error = response.error
             except Exception as exc:
                 capture.web_search_error = str(exc)
                 LOGGER.warning("Heuristic web search failed for prompt '%s': %s", prompt, exc)
@@ -535,19 +541,7 @@ class PlanningAgent:
 
     @staticmethod
     def _should_search_web(prompt: str) -> bool:
-        lowered = prompt.lower()
-        markers = (
-            "latest",
-            "release note",
-            "release notes",
-            "best practice",
-            "best practices",
-            "sdk",
-            "api",
-            "framework",
-            "library",
-        )
-        return any(marker in lowered for marker in markers)
+        return should_search_web(prompt)
 
     @staticmethod
     def _fallback_plan(

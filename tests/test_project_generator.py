@@ -120,7 +120,13 @@ def test_project_generator_uses_template_fallback_when_model_is_not_configured()
         shutil.rmtree(root, ignore_errors=True)
 
     assert result.used_model is False
-    assert len(result.files) == 3
+    assert len(result.files) == 4
+    assert [item.path for item in result.files] == [
+        "index.html",
+        "css/styles.css",
+        "README.md",
+        "js/app.js",
+    ]
     assert "Trail Atlas" in index_content
 
 
@@ -181,3 +187,64 @@ def test_project_generator_marks_existing_files_as_modified() -> None:
     modified = [item.path for item in result.files if item.existed_before]
     assert modified == ["README.md"]
     assert "DevMate Update" in readme_content
+
+def test_browser_game_prompt_expands_single_file_plan_into_runnable_scaffold() -> None:
+    root = _make_test_root()
+    try:
+        config_path = root / "config.toml"
+        _write_config(config_path)
+        settings = load_settings(config_path)
+        object.__setattr__(settings.model, "api_key", "your_minimax_api_key_here")
+        generator = ProjectGenerator(settings)
+        plan = AgentPlan(
+            summary="Build a Flappy Bird web game.",
+            planned_files=["index.html"],
+            implementation_steps=["Create a game page."],
+            used_model=False,
+        )
+
+        result = generator.generate_project(
+            "???? flappy bird ? web ??",
+            plan,
+            output_dir=root / "out",
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert [item.path for item in result.files] == [
+        "index.html",
+        "styles.css",
+        "js/main.js",
+        "js/game.js",
+        "README.md",
+    ]
+
+
+def test_browser_game_prompt_keeps_existing_web_scaffold_paths_without_duplication() -> None:
+    root = _make_test_root()
+    try:
+        config_path = root / "config.toml"
+        _write_config(config_path)
+        settings = load_settings(config_path)
+        generator = ProjectGenerator(settings)
+        plan = AgentPlan(
+            summary="Build a Flappy Bird web game.",
+            planned_files=[
+                "flappy-bird/index.html",
+                "flappy-bird/style.css",
+                "flappy-bird/game.js",
+            ],
+            implementation_steps=["Create the scaffold."],
+            used_model=True,
+        )
+
+        normalized = generator.normalize_plan("build a flappy bird web game", plan)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert normalized.planned_files == [
+        "flappy-bird/index.html",
+        "flappy-bird/style.css",
+        "flappy-bird/game.js",
+        "README.md",
+    ]

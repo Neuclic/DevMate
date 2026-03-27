@@ -1,7 +1,8 @@
-"""MCP server implementation for Tavily-backed web search."""
+﻿"""MCP server implementation for Tavily-backed web search."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import socket
 from dataclasses import dataclass
@@ -77,30 +78,53 @@ class TavilySearchBackend:
             "Content-Type": "application/json",
         }
 
-        try:
-            timeout = httpx.Timeout(self.timeout_seconds)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(TAVILY_API_URL, headers=headers, json=payload)
-                response.raise_for_status()
-        except httpx.TimeoutException as exc:
-            LOGGER.exception("Tavily search timed out for query='%s'", query)
-            raise RuntimeError(
-                f"Tavily search timed out after {self.timeout_seconds} seconds."
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            response_text = exc.response.text[:500]
-            LOGGER.exception(
-                "Tavily search failed with status=%s for query='%s'",
-                exc.response.status_code,
-                query,
-            )
-            raise RuntimeError(
-                "Tavily search request failed with status "
-                f"{exc.response.status_code}: {response_text}"
-            ) from exc
-        except httpx.RequestError as exc:
-            LOGGER.exception("Tavily search request error for query='%s'", query)
-            raise RuntimeError(f"Tavily search request error: {exc}") from exc
+        response: httpx.Response | None = None
+        last_error: Exception | None = None
+        timeout = httpx.Timeout(self.timeout_seconds)
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.post(TAVILY_API_URL, headers=headers, json=payload)
+                    response.raise_for_status()
+                    break
+            except httpx.TimeoutException as exc:
+                last_error = exc
+                LOGGER.warning("Tavily search timed out on attempt %d for query='%s'", attempt + 1, query)
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                response_text = exc.response.text[:500]
+                LOGGER.warning(
+                    "Tavily search failed with status=%s on attempt %d for query='%s'",
+                    exc.response.status_code,
+                    attempt + 1,
+                    query,
+                )
+                if exc.response.status_code < 500:
+                    raise RuntimeError(
+                        "Tavily search request failed with status "
+                        f"{exc.response.status_code}: {response_text}"
+                    ) from exc
+            except httpx.RequestError as exc:
+                last_error = exc
+                LOGGER.warning("Tavily search request error on attempt %d for query='%s': %s", attempt + 1, query, exc)
+
+            if attempt < 2:
+                await asyncio.sleep(0.8 * (attempt + 1))
+
+        if response is None:
+            if isinstance(last_error, httpx.TimeoutException):
+                raise RuntimeError(
+                    f"Tavily search timed out after {self.timeout_seconds} seconds."
+                ) from last_error
+            if isinstance(last_error, httpx.HTTPStatusError):
+                response_text = last_error.response.text[:500]
+                raise RuntimeError(
+                    "Tavily search request failed with status "
+                    f"{last_error.response.status_code}: {response_text}"
+                ) from last_error
+            if isinstance(last_error, httpx.RequestError):
+                raise RuntimeError(f"Tavily search request error: {last_error}") from last_error
+            raise RuntimeError("Tavily search failed for an unknown reason.")
 
         data = response.json()
         results = [
@@ -183,9 +207,15 @@ def create_search_mcp_server(settings: AppSettings) -> FastMCP:
                 search_depth=search_depth,
                 topic=topic,
             )
-        except RuntimeError:
-            LOGGER.exception("search_web tool failed for query='%s'", query)
-            raise
+        except RuntimeError as exc:
+            LOGGER.warning("search_web tool degraded for query='%s': %s", query, exc)
+            return {
+                "query": query,
+                "answer": None,
+                "results": [],
+                "response_time": None,
+                "error": str(exc),
+            }
 
     @server.custom_route("/health", methods=["GET"])
     async def health(_: Request) -> Response:
@@ -227,3 +257,4 @@ def run_mcp_server(settings: AppSettings) -> None:
     )
     server = create_search_mcp_server(settings)
     server.run(transport="streamable-http")
+

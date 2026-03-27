@@ -1,9 +1,96 @@
 services:
-  devmate:
+  devmate-mcp:
     build:
       context: .
       dockerfile: Dockerfile
-    image: devmate:local
+    image: devmate-backend:local
+    command: ["python", "-m", "devmate", "--config", "config.docker.toml", "--serve-mcp"]
+    environment:
+      MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimaxi.com/v1}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY}
+      MINIMAX_MODEL_NAME: ${MINIMAX_MODEL_NAME:-MiniMax-M2}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
+      DASHSCOPE_EMBEDDING_MODEL: ${DASHSCOPE_EMBEDDING_MODEL:-text-embedding-v4}
+      TAVILY_API_KEY: ${TAVILY_API_KEY}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
     volumes:
-      - ./:/app
-    command: ["python", "-m", "devmate"]
+      - ./.skills:/app/.skills
+      - ./.sessions:/app/.sessions
+      - ./generated-output:/app/generated-output
+      - ./.chroma:/app/.chroma
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5).read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  devmate-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: devmate-backend:local
+    command:
+      [
+        "python",
+        "-m",
+        "devmate",
+        "--config",
+        "config.docker.toml",
+        "--serve-web",
+        "--web-host",
+        "0.0.0.0",
+        "--web-port",
+        "8765",
+      ]
+    environment:
+      MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimaxi.com/v1}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY}
+      MINIMAX_MODEL_NAME: ${MINIMAX_MODEL_NAME:-MiniMax-M2}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
+      DASHSCOPE_EMBEDDING_MODEL: ${DASHSCOPE_EMBEDDING_MODEL:-text-embedding-v4}
+      TAVILY_API_KEY: ${TAVILY_API_KEY}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+    depends_on:
+      devmate-mcp:
+        condition: service_healthy
+    volumes:
+      - ./.skills:/app/.skills
+      - ./.sessions:/app/.sessions
+      - ./generated-output:/app/generated-output
+      - ./.chroma:/app/.chroma
+    ports:
+      - "8765:8765"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/', timeout=5).read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  devmate-frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: devmate-frontend:local
+    depends_on:
+      devmate-web:
+        condition: service_healthy
+    ports:
+      - "5173:80"

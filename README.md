@@ -1,5 +1,56 @@
 # DevMate
 
+## One-Command Local Stack
+
+If you want MCP, the backend API, and the frontend dev server together, use:
+
+```powershell
+cd D:\DevMate
+$env:UV_CACHE_DIR = ".uv-cache"
+uv run devmate --serve-stack
+```
+
+This starts:
+
+- MCP health: `http://localhost:8001/health`
+- Web API: `http://127.0.0.1:8765`
+- Frontend: `http://127.0.0.1:5173`
+
+Press `Ctrl+C` once in that terminal to stop all three services together.
+
+## Docker Deployment
+
+DevMate now includes a containerized stack for:
+
+- `devmate-mcp` on `http://localhost:8001`
+- `devmate-web` on `http://localhost:8765`
+- `devmate-frontend` on `http://localhost:5173`
+
+1. Copy the example environment file and fill in your real keys:
+
+```powershell
+cd D:\DevMate
+Copy-Item compose.env.example .env
+```
+
+2. Start the full stack:
+
+```powershell
+docker compose up --build
+```
+
+3. Open the frontend:
+
+```text
+http://127.0.0.1:5173
+```
+
+Container notes:
+
+- The backend services read [config.docker.toml](/D:/DevMate/config.docker.toml).
+- `/api` and `/api/chat/stream` are proxied through the frontend container by [frontend/nginx.conf](/D:/DevMate/frontend/nginx.conf).
+- Persistent app data lives in Docker volumes for `.skills`, `.sessions`, `generated-output`, and `.chroma`.
+
 ## Demo Runbook
 
 Use this flow when you want one repeatable end-to-end demo:

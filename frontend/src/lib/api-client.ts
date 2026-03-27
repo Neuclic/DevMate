@@ -1,4 +1,4 @@
-import {
+﻿import {
   type ChatResponse,
   type FileNode,
   type Message,
@@ -91,8 +91,11 @@ class ApiClient {
     return raw.map(normalizeFileNode);
   }
 
-  public async getFileContent(path: string): Promise<string> {
+  public async getFileContent(path: string, sessionId?: string): Promise<string> {
     const params = new URLSearchParams({ path });
+    if (sessionId) {
+      params.set("session_id", sessionId);
+    }
     const raw = await this.request<string>(`/api/files/content?${params.toString()}`);
     return typeof raw === "string" ? raw : "";
   }
@@ -505,3 +508,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export const apiClient = new ApiClient();
+

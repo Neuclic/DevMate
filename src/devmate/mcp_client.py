@@ -35,6 +35,7 @@ class SearchResponse:
     results: list[SearchResult]
     answer: str | None = None
     response_time: float | None = None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,6 +159,7 @@ class SearchMcpClient:
             results=items,
             answer=payload.get("answer"),
             response_time=payload.get("response_time"),
+            error=payload.get("error"),
         )
 
     @staticmethod
