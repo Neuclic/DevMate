@@ -1,4 +1,4 @@
-"""Tests for prompt-time MCP search integration."""
+﻿"""Tests for prompt-time MCP search integration."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from devmate.agent_runtime import DevMateRuntime
 from devmate.config_loader import load_settings
 from devmate.mcp_client import SearchResponse, SearchResult
 from devmate.planning_agent import AgentPlan
+from devmate.project_generator import GeneratedFile, GenerationResult
+from devmate.skill_registry import SkillNote, SkillRegistry
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
@@ -46,7 +48,9 @@ class FakePlanningAgent:
     def build_plan(self, prompt: str, **kwargs: object) -> AgentPlan:
         search_client = kwargs.get("search_client")
         knowledge_base = kwargs.get("knowledge_base")
+        skill_registry = kwargs.get("skill_registry")
         local_snippets = knowledge_base.search(prompt, limit=4) if knowledge_base else []
+        matched_skills = skill_registry.search(prompt, limit=3) if skill_registry else []
         web_results: list[SearchResult] = []
         web_search_attempted = False
         web_search_error: str | None = None
@@ -69,9 +73,25 @@ class FakePlanningAgent:
             ],
             used_model=False,
             local_snippets=local_snippets,
+            matched_skills=matched_skills,
             web_results=web_results,
             web_search_attempted=web_search_attempted,
             web_search_error=web_search_error,
+        )
+
+
+class FakeProjectGenerator:
+    """Fake project generator used to verify runtime generation wiring."""
+
+    def generate_project(self, prompt: str, plan: AgentPlan, output_dir: Path) -> GenerationResult:
+        del prompt, plan
+        return GenerationResult(
+            output_dir=str(output_dir),
+            files=[
+                GeneratedFile(path="index.html", content="<h1>Demo</h1>", existed_before=False),
+                GeneratedFile(path="README.md", content="# Demo", existed_before=True),
+            ],
+            used_model=False,
         )
 
 
@@ -81,7 +101,7 @@ def _make_test_root() -> Path:
     return root
 
 
-def _write_config(path: Path, *, docs_dir: Path) -> None:
+def _write_config(path: Path, *, docs_dir: Path, skills_dir: Path) -> None:
     path.write_text(
         "\n".join(
             [
@@ -122,7 +142,7 @@ def _write_config(path: Path, *, docs_dir: Path) -> None:
                 'langchain_api_key = "test"',
                 "",
                 "[skills]",
-                'skills_dir = ".skills"',
+                f'skills_dir = "{skills_dir.as_posix()}"',
                 "",
             ]
         ),
@@ -135,12 +155,22 @@ def test_prompt_triggers_web_search() -> None:
     try:
         config_path = root / "config.toml"
         docs_dir = root / "docs"
+        skills_dir = root / ".skills"
         docs_dir.mkdir()
+        skills_dir.mkdir()
         (docs_dir / "guide.md").write_text(
             "FastAPI project guidelines and release process.",
             encoding="utf-8",
         )
-        _write_config(config_path, docs_dir=docs_dir)
+        SkillRegistry(skills_dir).save(
+            SkillNote(
+                name="Build API Service",
+                summary="Use this when the prompt asks for an API backend.",
+                steps=["Define routes.", "Add tests."],
+                keywords=["fastapi", "api", "backend"],
+            )
+        )
+        _write_config(config_path, docs_dir=docs_dir, skills_dir=skills_dir)
 
         settings = load_settings(config_path)
         runtime = DevMateRuntime(
@@ -157,6 +187,7 @@ def test_prompt_triggers_web_search() -> None:
     assert result.summary == "Plan for: latest FastAPI release notes"
     assert len(result.web_results) == 1
     assert result.web_results[0].title == "FastAPI release notes"
+    assert result.matched_skills == ["Build API Service"]
     assert result.planned_files == [
         "src/devmate/agent_runtime.py",
         "tests/test_agent_runtime.py",
@@ -170,12 +201,14 @@ def test_prompt_gracefully_handles_web_search_failure() -> None:
     try:
         config_path = root / "config.toml"
         docs_dir = root / "docs"
+        skills_dir = root / ".skills"
         docs_dir.mkdir()
+        skills_dir.mkdir()
         (docs_dir / "guide.md").write_text(
             "FastAPI project guidelines.",
             encoding="utf-8",
         )
-        _write_config(config_path, docs_dir=docs_dir)
+        _write_config(config_path, docs_dir=docs_dir, skills_dir=skills_dir)
 
         settings = load_settings(config_path)
         runtime = DevMateRuntime(
@@ -192,3 +225,67 @@ def test_prompt_gracefully_handles_web_search_failure() -> None:
     assert result.web_results == []
     assert result.web_search_error == "server unavailable"
     assert result.summary == "Plan for: latest FastAPI release notes"
+
+
+def test_prompt_can_save_skill_note() -> None:
+    root = _make_test_root()
+    try:
+        config_path = root / "config.toml"
+        docs_dir = root / "docs"
+        skills_dir = root / ".skills"
+        docs_dir.mkdir()
+        skills_dir.mkdir()
+        (docs_dir / "guide.md").write_text("Frontend layout guidance.", encoding="utf-8")
+        _write_config(config_path, docs_dir=docs_dir, skills_dir=skills_dir)
+
+        settings = load_settings(config_path)
+        runtime = DevMateRuntime(
+            settings,
+            search_client=SuccessfulSearchClient(),
+            planning_agent=FakePlanningAgent(),
+        )
+
+        result = runtime.handle_prompt(
+            "build a responsive map website",
+            save_skill_name="Build Map Website",
+        )
+        saved_path = Path(result.saved_skill_path or "")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert result.saved_skill_path is not None
+    assert saved_path.name == "SKILL.md"
+    assert saved_path.parent.name == "build-map-website"
+
+
+def test_prompt_can_generate_project_files() -> None:
+    root = _make_test_root()
+    try:
+        config_path = root / "config.toml"
+        docs_dir = root / "docs"
+        skills_dir = root / ".skills"
+        docs_dir.mkdir()
+        skills_dir.mkdir()
+        (docs_dir / "guide.md").write_text("Frontend layout guidance.", encoding="utf-8")
+        _write_config(config_path, docs_dir=docs_dir, skills_dir=skills_dir)
+
+        settings = load_settings(config_path)
+        runtime = DevMateRuntime(
+            settings,
+            search_client=SuccessfulSearchClient(),
+            planning_agent=FakePlanningAgent(),
+            project_generator=FakeProjectGenerator(),
+        )
+
+        result = runtime.handle_prompt(
+            "build a responsive map website",
+            generate_output_dir=root / "out",
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert result.generation_output_dir is not None
+    assert result.generated_files == ["index.html", "README.md"]
+    assert result.generated_created_files == ["index.html"]
+    assert result.generated_modified_files == ["README.md"]
+    assert result.generation_used_model is False

@@ -8,11 +8,13 @@ from dataclasses import dataclass, field
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from langsmith.run_helpers import traceable
 from pydantic import BaseModel, Field
 
 from devmate.config_loader import AppSettings
 from devmate.mcp_client import SearchMcpClient, SearchResult
 from devmate.rag_pipeline import KnowledgeBasePipeline, KnowledgeSnippet
+from devmate.skill_registry import SkillNote, SkillRegistry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ class ToolCapture:
     """Collected retrieval context used during one agent run."""
 
     local_snippets: list[KnowledgeSnippet] = field(default_factory=list)
+    matched_skills: list[SkillNote] = field(default_factory=list)
     web_results: list[SearchResult] = field(default_factory=list)
     web_search_attempted: bool = False
     web_search_error: str | None = None
@@ -48,6 +51,7 @@ class AgentPlan:
     implementation_steps: list[str]
     used_model: bool
     local_snippets: list[KnowledgeSnippet] = field(default_factory=list)
+    matched_skills: list[SkillNote] = field(default_factory=list)
     web_results: list[SearchResult] = field(default_factory=list)
     web_search_attempted: bool = False
     web_search_error: str | None = None
@@ -61,13 +65,16 @@ class PlanningAgent:
         self.settings = settings
         self._model = model
 
+    @traceable(run_type="chain", name="devmate_build_plan")
     def build_plan(
         self,
         prompt: str,
         *,
         knowledge_base: KnowledgeBasePipeline | None = None,
         search_client: SearchMcpClient | None = None,
+        skill_registry: SkillRegistry | None = None,
         local_snippets: list[KnowledgeSnippet] | None = None,
+        matched_skills: list[SkillNote] | None = None,
         web_results: list[SearchResult] | None = None,
     ) -> AgentPlan:
         """Build an implementation plan using tools when the model is available."""
@@ -75,6 +82,7 @@ class PlanningAgent:
             return self._fallback_plan(
                 prompt=prompt,
                 local_snippets=local_snippets or [],
+                matched_skills=matched_skills or [],
                 web_results=web_results or [],
             )
 
@@ -84,12 +92,15 @@ class PlanningAgent:
                 prompt,
                 knowledge_base=knowledge_base,
                 search_client=search_client,
+                skill_registry=skill_registry,
                 local_snippets=local_snippets,
+                matched_skills=matched_skills,
                 web_results=web_results,
             )
             return self._fallback_plan(
                 prompt=prompt,
                 local_snippets=heuristics.local_snippets,
+                matched_skills=heuristics.matched_skills,
                 web_results=heuristics.web_results,
                 web_search_attempted=heuristics.web_search_attempted,
                 web_search_error=heuristics.web_search_error,
@@ -100,25 +111,22 @@ class PlanningAgent:
             return self._build_plan_from_context(
                 prompt,
                 local_snippets=local_snippets or [],
+                matched_skills=matched_skills or [],
                 web_results=web_results or [],
             )
 
         capture = ToolCapture()
         agent = create_agent(
             model=self._get_model(),
-            tools=self._build_tools(knowledge_base, search_client, capture),
+            tools=self._build_tools(knowledge_base, search_client, skill_registry, capture),
             system_prompt=self._system_prompt(),
-            response_format=PlanResponse,
             name="devmate-planning-agent",
         )
 
         try:
-            result = agent.invoke(
-                {"messages": [{"role": "user", "content": prompt}]}
-            )
-            structured = result.get("structured_response")
-            if not isinstance(structured, PlanResponse):
-                raise ValueError("LangChain agent did not return structured plan output.")
+            result = agent.invoke({"messages": [{"role": "user", "content": prompt}]})
+            text = self._extract_agent_text(result)
+            structured = self._parse_plan_text(text)
             return AgentPlan(
                 summary=structured.summary.strip(),
                 planned_files=[item.strip() for item in structured.planned_files if item.strip()],
@@ -127,6 +135,7 @@ class PlanningAgent:
                 ],
                 used_model=True,
                 local_snippets=capture.local_snippets,
+                matched_skills=capture.matched_skills,
                 web_results=capture.web_results,
                 web_search_attempted=capture.web_search_attempted,
                 web_search_error=capture.web_search_error,
@@ -137,12 +146,15 @@ class PlanningAgent:
                 prompt,
                 knowledge_base=knowledge_base,
                 search_client=search_client,
+                skill_registry=skill_registry,
                 local_snippets=local_snippets,
+                matched_skills=matched_skills,
                 web_results=web_results,
             )
             fallback = self._fallback_plan(
                 prompt=prompt,
                 local_snippets=heuristics.local_snippets,
+                matched_skills=heuristics.matched_skills,
                 web_results=heuristics.web_results,
                 web_search_attempted=heuristics.web_search_attempted,
                 web_search_error=heuristics.web_search_error,
@@ -153,6 +165,7 @@ class PlanningAgent:
                 implementation_steps=fallback.implementation_steps,
                 used_model=False,
                 local_snippets=fallback.local_snippets,
+                matched_skills=fallback.matched_skills,
                 web_results=fallback.web_results,
                 web_search_attempted=fallback.web_search_attempted,
                 web_search_error=fallback.web_search_error,
@@ -164,11 +177,12 @@ class PlanningAgent:
         prompt: str,
         *,
         local_snippets: list[KnowledgeSnippet],
+        matched_skills: list[SkillNote],
         web_results: list[SearchResult],
     ) -> AgentPlan:
         try:
             response = self._get_model().invoke(
-                self._build_messages(prompt, local_snippets, web_results)
+                self._build_messages(prompt, local_snippets, matched_skills, web_results)
             )
             text = self._message_text(response.content)
             structured = self._parse_plan_text(text)
@@ -178,6 +192,7 @@ class PlanningAgent:
                 implementation_steps=structured.implementation_steps,
                 used_model=True,
                 local_snippets=local_snippets,
+                matched_skills=matched_skills,
                 web_results=web_results,
                 web_search_attempted=bool(web_results),
             )
@@ -186,6 +201,7 @@ class PlanningAgent:
             fallback = self._fallback_plan(
                 prompt=prompt,
                 local_snippets=local_snippets,
+                matched_skills=matched_skills,
                 web_results=web_results,
                 web_search_attempted=bool(web_results),
             )
@@ -195,6 +211,7 @@ class PlanningAgent:
                 implementation_steps=fallback.implementation_steps,
                 used_model=False,
                 local_snippets=fallback.local_snippets,
+                matched_skills=fallback.matched_skills,
                 web_results=fallback.web_results,
                 web_search_attempted=fallback.web_search_attempted,
                 web_search_error=fallback.web_search_error,
@@ -225,6 +242,7 @@ class PlanningAgent:
         self,
         knowledge_base: KnowledgeBasePipeline,
         search_client: SearchMcpClient,
+        skill_registry: SkillRegistry | None,
         capture: ToolCapture,
     ) -> list[object]:
         @tool
@@ -235,6 +253,30 @@ class PlanningAgent:
             if not snippets:
                 return "No local knowledge matches were found."
             return self._format_local_snippets(snippets)
+
+        @tool
+        def search_saved_skills(query: str) -> str:
+            """Search saved successful task patterns and reusable skills."""
+            if skill_registry is None:
+                return "No saved skills registry is configured."
+            notes = skill_registry.search(query, limit=3)
+            capture.matched_skills = notes
+            if not notes:
+                return "No matching saved skills were found."
+            return self._format_skills(notes)
+
+        @tool
+        def read_saved_skill(skill_name: str) -> str:
+            """Read the full content of one saved skill after it has been selected."""
+            if skill_registry is None:
+                return "No saved skills registry is configured."
+            note = skill_registry.load(skill_name)
+            if note is None:
+                return f"No saved skill named '{skill_name}' was found."
+            if all(existing.name != note.name for existing in capture.matched_skills):
+                capture.matched_skills.append(note)
+            context = skill_registry.load_context(skill_name)
+            return context or f"No detailed content was available for '{skill_name}'."
 
         @tool
         def search_web(query: str) -> str:
@@ -253,7 +295,7 @@ class PlanningAgent:
                 return "Web search returned no results."
             return self._format_web_results(response.results)
 
-        return [search_local_knowledge, search_web]
+        return [search_local_knowledge, search_saved_skills, read_saved_skill, search_web]
 
     @staticmethod
     def _system_prompt() -> str:
@@ -261,15 +303,19 @@ class PlanningAgent:
             "You are DevMate, a coding assistant planning agent. "
             "Use tools only when they materially improve the plan. "
             "Use search_local_knowledge for local docs, templates, and coding guidelines. "
+            "Use search_saved_skills to find prior task patterns, then use read_saved_skill on the best match before relying on it. "
             "Use search_web for latest external facts, best practices, libraries, or release notes. "
-            "Do not call both tools unless the user request clearly needs both. "
-            "Return a structured plan with concise, practical file targets and steps."
+            "Do not call every tool by default. "
+            "Return JSON only with the keys summary, planned_files, implementation_steps. "
+            "planned_files must be repo-relative paths. "
+            "implementation_steps must contain 3 to 6 short actionable strings."
         )
 
     @staticmethod
     def _build_messages(
         prompt: str,
         local_snippets: list[KnowledgeSnippet],
+        matched_skills: list[SkillNote],
         web_results: list[SearchResult],
     ) -> list[dict[str, str]]:
         return [
@@ -286,7 +332,12 @@ class PlanningAgent:
             },
             {
                 "role": "user",
-                "content": PlanningAgent._build_context(prompt, local_snippets, web_results),
+                "content": PlanningAgent._build_context(
+                    prompt,
+                    local_snippets,
+                    matched_skills,
+                    web_results,
+                ),
             },
         ]
 
@@ -298,29 +349,41 @@ class PlanningAgent:
         )
 
     @staticmethod
-    def _format_web_results(results: list[SearchResult]) -> str:
+    def _format_skills(skills: list[SkillNote]) -> str:
         return "\n".join(
-            f"- {item.title} | {item.url} | {item.snippet}"
-            for item in results
+            (
+                f"- {item.name} | {item.summary} | "
+                f"keywords={', '.join(item.keywords) if item.keywords else 'none'} | "
+                f"steps={'; '.join(item.steps)}"
+            )
+            for item in skills
         )
+
+    @staticmethod
+    def _format_web_results(results: list[SearchResult]) -> str:
+        return "\n".join(f"- {item.title} | {item.url} | {item.snippet}" for item in results)
 
     @staticmethod
     def _build_context(
         prompt: str,
         local_snippets: list[KnowledgeSnippet],
+        matched_skills: list[SkillNote],
         web_results: list[SearchResult],
     ) -> str:
         local_block = "\n".join(
-            f"- {snippet.source_name}: {snippet.excerpt}"
-            for snippet in local_snippets
+            f"- {snippet.source_name}: {snippet.excerpt}" for snippet in local_snippets
+        ) or "- none"
+        skill_block = "\n".join(
+            f"- {item.name}: {item.summary} | steps: {'; '.join(item.steps)}"
+            for item in matched_skills
         ) or "- none"
         web_block = "\n".join(
-            f"- {item.title} | {item.url} | {item.snippet}"
-            for item in web_results
+            f"- {item.title} | {item.url} | {item.snippet}" for item in web_results
         ) or "- none"
         return (
             f"User request:\n{prompt}\n\n"
             f"Local knowledge snippets:\n{local_block}\n\n"
+            f"Matched saved skills:\n{skill_block}\n\n"
             f"Web results:\n{web_block}\n\n"
             "Generate the next implementation plan for this repository."
         )
@@ -340,6 +403,22 @@ class PlanningAgent:
                         parts.append(text)
             return "\n".join(parts).strip()
         return str(content)
+
+    @classmethod
+    def _extract_agent_text(cls, result: dict[str, object]) -> str:
+        messages = result.get("messages")
+        if isinstance(messages, list) and messages:
+            content = getattr(messages[-1], "content", None)
+            if content is not None:
+                text = cls._message_text(content)
+                if text.strip():
+                    return text
+        output = result.get("output")
+        if output is not None:
+            text = cls._message_text(output)
+            if text.strip():
+                return text
+        raise ValueError("LangChain agent did not return a readable final message.")
 
     @classmethod
     def _parse_plan_text(cls, text: str) -> AgentPlan:
@@ -389,15 +468,20 @@ class PlanningAgent:
         *,
         knowledge_base: KnowledgeBasePipeline | None,
         search_client: SearchMcpClient | None,
+        skill_registry: SkillRegistry | None,
         local_snippets: list[KnowledgeSnippet] | None,
+        matched_skills: list[SkillNote] | None,
         web_results: list[SearchResult] | None,
     ) -> ToolCapture:
         capture = ToolCapture(
             local_snippets=list(local_snippets or []),
+            matched_skills=list(matched_skills or []),
             web_results=list(web_results or []),
         )
         if not capture.local_snippets and knowledge_base is not None:
             capture.local_snippets = knowledge_base.search(prompt, limit=self.settings.rag.top_k)
+        if not capture.matched_skills and skill_registry is not None:
+            capture.matched_skills = skill_registry.search(prompt, limit=3)
         if not capture.web_results and search_client is not None and self._should_search_web(prompt):
             capture.web_search_attempted = True
             try:
@@ -432,6 +516,7 @@ class PlanningAgent:
         prompt: str,
         *,
         local_snippets: list[KnowledgeSnippet],
+        matched_skills: list[SkillNote],
         web_results: list[SearchResult],
         web_search_attempted: bool = False,
         web_search_error: str | None = None,
@@ -443,6 +528,8 @@ class PlanningAgent:
             "src/devmate/mcp_client.py",
             "tests/test_agent_runtime.py",
         ]
+        if matched_skills:
+            planned_files.append(".skills/")
         if focus == "frontend":
             planned_files.extend(
                 [
@@ -455,11 +542,13 @@ class PlanningAgent:
 
         summary = (
             "Prepared an initial implementation plan from "
-            f"{len(local_snippets)} local snippets and {len(web_results)} web results."
+            f"{len(local_snippets)} local snippets, "
+            f"{len(matched_skills)} matched skills and {len(web_results)} web results."
         )
         steps = [
             "Review the prompt and extracted context to confirm the target feature scope.",
-            "Update the relevant runtime and integration modules for the requested behavior.",
+            "Reuse any matching saved skill before updating runtime and integration modules.",
+            "Implement the requested behavior in the relevant modules and configuration files.",
             "Add or adjust tests to cover the new execution path and failure cases.",
             "Run the local verification commands and capture any follow-up gaps.",
         ]
@@ -469,6 +558,7 @@ class PlanningAgent:
             implementation_steps=steps,
             used_model=False,
             local_snippets=local_snippets,
+            matched_skills=matched_skills,
             web_results=web_results,
             web_search_attempted=web_search_attempted,
             web_search_error=web_search_error,

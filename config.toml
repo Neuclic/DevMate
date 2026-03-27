@@ -18,7 +18,7 @@ model_name = "MiniMax-M2"
 # DashScope Singapore OpenAI-compatible embeddings endpoint:
 # https://dashscope-intl.aliyuncs.com/compatible-mode/v1
 embedding_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-embedding_api_key = "sk-ef17349b734e400ca0ea276503bca35d"
+embedding_api_key = "your_dashscope_api_key_here"
 embedding_model_name = "text-embedding-v4"
 
 [search]
@@ -43,6 +43,9 @@ top_k = 4
 [langsmith]
 langchain_tracing_v2 = true
 langchain_api_key = "your_langchain_api_key_here"
+project_name = "DevMate"
+endpoint = "https://api.smith.langchain.com"
+share_public_traces = false
 
 [skills]
 skills_dir = ".skills"

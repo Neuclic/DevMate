@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from devmate.config_loader import (
     AppSection,
     AppSettings,
@@ -12,7 +14,12 @@ from devmate.config_loader import (
     SearchSection,
     SkillsSection,
 )
-from devmate.main import build_parser, resolve_rag_manifest_path
+from devmate.main import (
+    build_parser,
+    is_placeholder,
+    resolve_rag_manifest_path,
+    resolve_skills_dir,
+)
 
 
 def _settings() -> AppSettings:
@@ -68,9 +75,56 @@ def test_build_parser_parses_rag_query_arguments() -> None:
     assert args.rag_limit == 2
 
 
+def test_build_parser_parses_skill_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["--prompt", "build a site", "--save-skill", "Build Static Site"])
+
+    assert args.prompt == "build a site"
+    assert args.save_skill == "Build Static Site"
+
+
+def test_build_parser_parses_generate_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["--prompt", "build a site", "--generate", "--output-dir", "out/demo"])
+
+    assert args.generate is True
+    assert args.output_dir == "out/demo"
+
+
+def test_build_parser_parses_config_check_argument() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["--config-check"])
+
+    assert args.config_check is True
+
+
+def test_build_parser_parses_trace_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["--prompt", "build a site", "--print-trace-url", "--share-trace"])
+
+    assert args.print_trace_url is True
+    assert args.share_trace is True
+
+
 def test_resolve_rag_manifest_path_uses_docs_parent_for_relative_paths() -> None:
     manifest_path = resolve_rag_manifest_path(_settings())
 
     assert manifest_path.name == "manifest.json"
     assert manifest_path.parent.name == "devmate-docs"
     assert manifest_path.parent.parent.name == ".chroma"
+
+
+def test_resolve_skills_dir_uses_cwd_for_relative_paths() -> None:
+    skills_dir = resolve_skills_dir(_settings())
+
+    assert skills_dir.name == ".skills"
+    assert skills_dir.parent == Path.cwd()
+
+
+def test_is_placeholder_detects_template_values() -> None:
+    assert is_placeholder("your_minimax_api_key_here") is True
+    assert is_placeholder("real-value") is False

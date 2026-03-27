@@ -1,5 +1,58 @@
 # DevMate
 
+## Demo Runbook
+
+Use this flow when you want one repeatable end-to-end demo:
+
+1. Start the MCP server in Terminal 1:
+
+```powershell
+cd D:\DevMate
+$env:UV_CACHE_DIR = ".uv-cache"
+uv run devmate --serve-mcp
+```
+
+2. Validate the local configuration in Terminal 2:
+
+```powershell
+cd D:\DevMate
+$env:UV_CACHE_DIR = ".uv-cache"
+uv run devmate --config-check
+```
+
+Expected checkpoints:
+
+- `MiniMax model configured: True`
+- `Embedding configured: True`
+- `Tavily configured: True`
+- `LangSmith configured: True`
+
+3. Run one planning demo:
+
+```powershell
+cd D:\DevMate
+$env:UV_CACHE_DIR = ".uv-cache"
+uv run devmate --prompt "build a responsive map website with map sdk best practices" --print-trace-url
+```
+
+4. Run one generation demo:
+
+```powershell
+cd D:\DevMate
+$env:UV_CACHE_DIR = ".uv-cache"
+uv run devmate --prompt "build a responsive map website with map sdk best practices" --generate --output-dir generated-output --print-trace-url
+```
+
+Expected output highlights:
+
+- `Planning mode: llm`
+- `Local knowledge sources: ...`
+- `Matched skills: ...`
+- `LangSmith trace URL: ...`
+- `Generated output dir: generated-output`
+
+`generated-output/` is ignored by Git and can be recreated for each demo run.
+
 DevMate 是一个面向面试题的 AI 编程助手项目骨架。当前仓库已经完成本地 Git 初始化，并补齐了可继续开发的目录结构、配置入口、占位源码、Docker 骨架和中文项目计划。
 
 ## 当前目标

@@ -72,6 +72,9 @@ class LangSmithSection:
 
     langchain_tracing_v2: bool
     langchain_api_key: str
+    project_name: str = "DevMate"
+    endpoint: str = "https://api.smith.langchain.com"
+    share_public_traces: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,6 +174,9 @@ def load_settings(path: Path) -> AppSettings:
         langsmith=LangSmithSection(
             langchain_tracing_v2=langsmith["langchain_tracing_v2"],
             langchain_api_key=langsmith["langchain_api_key"],
+            project_name=langsmith.get("project_name", app["project_name"]),
+            endpoint=langsmith.get("endpoint", "https://api.smith.langchain.com"),
+            share_public_traces=langsmith.get("share_public_traces", False),
         ),
         skills=SkillsSection(
             skills_dir=skills["skills_dir"],

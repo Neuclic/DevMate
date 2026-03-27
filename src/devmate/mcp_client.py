@@ -12,6 +12,7 @@ import httpx
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
+from langsmith.run_helpers import traceable
 
 LOGGER = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class SearchMcpClient:
 
         LOGGER.info("MCP health check passed at %s", health_url)
 
+    @traceable(run_type="tool", name="search_web_mcp")
     async def search_web_async(
         self,
         query: str,

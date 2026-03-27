@@ -33,3 +33,4 @@ test_scratch/
 .pytest-run-temp/
 .pytest-run-cache/
 .chroma/
+generated-output/

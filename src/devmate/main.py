@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import logging
 from pathlib import Path
 
@@ -12,7 +13,13 @@ from devmate.config_loader import load_settings
 from devmate.logging_config import configure_logging
 from devmate.mcp_client import SearchMcpClient
 from devmate.mcp_server import run_mcp_server
+from devmate.observability import configure_langsmith
+from devmate.observability import is_placeholder
+from devmate.observability import langsmith_is_configured
+from devmate.observability import latest_trace_info
+from devmate.observability import trace_start_time
 from devmate.rag_pipeline import KnowledgeBasePipeline
+from devmate.skill_registry import SkillRegistry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -31,9 +38,55 @@ def build_parser() -> argparse.ArgumentParser:
         help="Application log level.",
     )
     parser.add_argument(
+        "--config-check",
+        action="store_true",
+        help="Validate which providers are effectively configured after local overrides.",
+    )
+    parser.add_argument(
+        "--print-trace-url",
+        action="store_true",
+        help="Print the latest LangSmith trace URL after a prompt run.",
+    )
+    parser.add_argument(
+        "--share-trace",
+        action="store_true",
+        help="Create and print a shareable LangSmith trace URL after a prompt run.",
+    )
+    parser.add_argument(
         "--prompt",
         default="",
         help="Optional prompt used to simulate one agent run.",
+    )
+    parser.add_argument(
+        "--generate",
+        action="store_true",
+        help="Generate files from the resulting implementation plan.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="generated-output",
+        help="Target directory used when --generate is enabled.",
+    )
+    parser.add_argument(
+        "--save-skill",
+        default="",
+        help="Save the generated plan as a reusable skill note with this name.",
+    )
+    parser.add_argument(
+        "--list-skills",
+        action="store_true",
+        help="List saved skills only.",
+    )
+    parser.add_argument(
+        "--skill-query",
+        default="",
+        help="Search saved skills only.",
+    )
+    parser.add_argument(
+        "--skill-limit",
+        type=int,
+        default=3,
+        help="Maximum number of saved skills to return.",
     )
     parser.add_argument(
         "--serve-mcp",
@@ -74,6 +127,13 @@ def resolve_rag_manifest_path(settings: AppSettings) -> Path:
     return docs_dir.parent / persist_directory / "manifest.json"
 
 
+def resolve_skills_dir(settings: AppSettings) -> Path:
+    """Resolve the configured skills directory."""
+    skills_dir = Path(settings.skills.skills_dir)
+    if skills_dir.is_absolute():
+        return skills_dir
+    return Path.cwd() / skills_dir
+
 def main() -> int:
     """Run the CLI application."""
     parser = build_parser()
@@ -81,6 +141,33 @@ def main() -> int:
 
     configure_logging(args.log_level)
     settings = load_settings(Path(args.config))
+    configure_langsmith(settings)
+
+    if args.config_check:
+        LOGGER.info(
+            "MiniMax model configured: %s",
+            not is_placeholder(settings.model.api_key),
+        )
+        LOGGER.info("MiniMax model name: %s", settings.model.model_name)
+        LOGGER.info("MiniMax base URL: %s", settings.model.ai_base_url)
+        LOGGER.info(
+            "Embedding configured: %s",
+            not is_placeholder(settings.model.embedding_api_key),
+        )
+        LOGGER.info("Embedding model name: %s", settings.model.embedding_model_name)
+        LOGGER.info(
+            "Tavily configured: %s",
+            not is_placeholder(settings.search.tavily_api_key),
+        )
+        LOGGER.info("MCP server URL: %s", settings.mcp.server_url)
+        LOGGER.info("Skills directory: %s", resolve_skills_dir(settings))
+        LOGGER.info(
+            "LangSmith configured: %s",
+            langsmith_is_configured(settings),
+        )
+        LOGGER.info("LangSmith project: %s", settings.langsmith.project_name)
+        LOGGER.info("LangSmith endpoint: %s", settings.langsmith.endpoint)
+        return 0
 
     if args.serve_mcp:
         run_mcp_server(settings)
@@ -119,10 +206,32 @@ def main() -> int:
             LOGGER.info("%s | %.4f | %s", item.source_name, item.score, item.excerpt)
         return 0
 
-    runtime = DevMateRuntime(settings=settings)
+    skills_registry = SkillRegistry(resolve_skills_dir(settings))
+
+    if args.list_skills:
+        skills = skills_registry.list_skills()
+        LOGGER.info("Saved skills: %d", len(skills))
+        for skill in skills:
+            LOGGER.info("%s | %s", skill.name, skill.summary)
+        return 0
+
+    if args.skill_query:
+        skills = skills_registry.search(args.skill_query, limit=args.skill_limit)
+        LOGGER.info("Skill query: %s", args.skill_query)
+        LOGGER.info("Skill results: %d", len(skills))
+        for skill in skills:
+            LOGGER.info("%s | %s", skill.name, ", ".join(skill.keywords) or "no-keywords")
+        return 0
+
+    runtime = DevMateRuntime(settings=settings, skill_registry=skills_registry)
 
     if args.prompt:
-        result = runtime.handle_prompt(args.prompt)
+        started_at = trace_start_time()
+        result = runtime.handle_prompt(
+            args.prompt,
+            save_skill_name=args.save_skill or None,
+            generate_output_dir=Path(args.output_dir) if args.generate else None,
+        )
         LOGGER.info("Prompt summary: %s", result.summary)
         LOGGER.info(
             "Planning mode: %s",
@@ -138,14 +247,42 @@ def main() -> int:
                 "Local knowledge sources: %s",
                 ", ".join(result.retrieved_sources),
             )
+        if result.matched_skills:
+            LOGGER.info("Matched skills: %s", ", ".join(result.matched_skills))
         if result.web_results:
             LOGGER.info("Web search results: %d", len(result.web_results))
             for item in result.web_results:
                 LOGGER.info("%s | %s", item.title, item.url)
         elif result.web_search_error:
             LOGGER.warning("Web search error: %s", result.web_search_error)
+        if result.saved_skill_path:
+            LOGGER.info("Saved skill: %s", result.saved_skill_path)
         if result.agent_error:
             LOGGER.warning("Planning agent error: %s", result.agent_error)
+        if result.generation_output_dir:
+            LOGGER.info("Generated output dir: %s", result.generation_output_dir)
+            LOGGER.info(
+                "Generation mode: %s",
+                "llm" if result.generation_used_model else "template-fallback",
+            )
+            if result.generated_files:
+                LOGGER.info("Generated files: %s", ", ".join(result.generated_files))
+            if result.generated_created_files:
+                LOGGER.info("Created files: %s", ", ".join(result.generated_created_files))
+            if result.generated_modified_files:
+                LOGGER.info("Modified files: %s", ", ".join(result.generated_modified_files))
+        if result.generation_error:
+            LOGGER.warning("Generation model error: %s", result.generation_error)
+        if args.print_trace_url or args.share_trace:
+            trace = latest_trace_info(
+                settings,
+                started_at=started_at,
+                share_public=args.share_trace or settings.langsmith.share_public_traces,
+            )
+            if trace is not None:
+                LOGGER.info("LangSmith trace URL: %s", trace.run_url)
+                if trace.shared_url:
+                    LOGGER.info("LangSmith shared trace URL: %s", trace.shared_url)
         return 0
 
     LOGGER.info("DevMate skeleton is ready.")

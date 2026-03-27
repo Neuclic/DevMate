@@ -1,12 +1,29 @@
 # Skills Directory
 
-这个目录用于存放可复用技能。
+This project now uses an official-style skill layout that is compatible with the common `SKILL.md` pattern used by deepagents and Anthropic-style skills repositories.
 
-建议后续为每个 Skill 使用单独的 Markdown 文件，内容至少包含：
+## Layout
 
-- 技能名称
-- 适用场景
-- 固定步骤
-- 输入要求
-- 输出要求
-- 注意事项
+Each skill lives in its own folder:
+
+```text
+.skills/
+  build-static-site/
+    SKILL.md
+  package-docker-delivery/
+    SKILL.md
+```
+
+## SKILL.md expectations
+
+- Optional frontmatter with fields such as `name`, `description`, `keywords`, and `tools`
+- A `# Skill Name` heading
+- A `## Summary` section
+- A `## Steps` section
+- Optional supporting markdown or text files in the same folder
+
+## Runtime behavior
+
+- The registry searches skill metadata first.
+- The agent can then load the full `SKILL.md` content for the best-matching skill.
+- Supporting `.md` and `.txt` files are included when full skill context is requested.

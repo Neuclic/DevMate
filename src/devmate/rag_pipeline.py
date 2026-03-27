@@ -9,11 +9,12 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
-from langchain_community.vectorstores import Chroma
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langsmith.run_helpers import traceable
 
 from devmate.config_loader import ModelSection, RagSection
 
@@ -46,6 +47,7 @@ class KnowledgeBasePipeline:
         self._vector_store: Chroma | None = None
         self._vector_store_signature: str | None = None
 
+    @traceable(run_type="retriever", name="search_knowledge_base")
     def search(self, query: str, limit: int = 3) -> list[KnowledgeSnippet]:
         """Search local documents with vector retrieval, then fallback to keywords."""
         if not query.strip() or not self.docs_dir.exists():

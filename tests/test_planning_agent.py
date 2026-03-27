@@ -10,6 +10,7 @@ from devmate.config_loader import load_settings
 from devmate.mcp_client import SearchResult
 from devmate.planning_agent import PlanningAgent
 from devmate.rag_pipeline import KnowledgeSnippet
+from devmate.skill_registry import SkillNote
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
@@ -128,6 +129,14 @@ def test_planning_agent_parses_json_response() -> None:
                     score=2,
                 )
             ],
+            matched_skills=[
+                SkillNote(
+                    name="Connect Runtime",
+                    summary="Use this when wiring runtime modules.",
+                    steps=["Inspect runtime.", "Wire planning outputs."],
+                    keywords=["runtime", "agent"],
+                )
+            ],
             web_results=[
                 SearchResult(
                     title="LangChain docs",
@@ -146,6 +155,7 @@ def test_planning_agent_parses_json_response() -> None:
         "tests/test_agent_runtime.py",
     ]
     assert plan.implementation_steps[1] == "Expose the plan through the CLI output."
+    assert plan.matched_skills[0].name == "Connect Runtime"
 
 
 def test_planning_agent_falls_back_without_real_model_config() -> None:
@@ -171,6 +181,14 @@ def test_planning_agent_falls_back_without_real_model_config() -> None:
                     score=1,
                 )
             ],
+            matched_skills=[
+                SkillNote(
+                    name="Build Static Site",
+                    summary="Use this for static websites.",
+                    steps=["Split files.", "Add verification."],
+                    keywords=["website", "frontend"],
+                )
+            ],
             web_results=[],
         )
     finally:
@@ -180,8 +198,9 @@ def test_planning_agent_falls_back_without_real_model_config() -> None:
     assert plan.model_error is None
     assert (
         plan.summary
-        == "Prepared an initial implementation plan from 1 local snippets and 0 web results."
+        == "Prepared an initial implementation plan from 1 local snippets, 1 matched skills and 0 web results."
     )
+    assert ".skills/" in plan.planned_files
     assert "docs/internal_frontend_guidelines.md" in plan.planned_files
 
 
@@ -198,6 +217,7 @@ def test_planning_agent_falls_back_on_model_error() -> None:
         plan = agent.build_plan(
             "build an api service",
             local_snippets=[],
+            matched_skills=[],
             web_results=[],
         )
     finally:
