@@ -1,8 +1,38 @@
 # DevMate
 
-## One-Command Local Stack
+DevMate 是一个基于 LangChain 的 AI 编程助手 demo，支持：
 
-If you want MCP, the backend API, and the frontend dev server together, use:
+- MCP + Tavily 联网搜索
+- 本地 RAG 文档检索
+- Skills 保存、检索和复用
+- 多文件项目规划、生成与修改
+- LangSmith 可观测性
+- React Web GUI
+- Docker 一键启动
+
+## 技术栈
+
+- Python 3.13
+- `uv`
+- LangChain
+- MCP (`Streamable HTTP`)
+- Tavily
+- Chroma / Embedding RAG
+- FastAPI
+- React 18 + TypeScript + Vite
+- Docker Compose
+
+## 本地启动
+
+### 1. 同步 Python 依赖
+
+```powershell
+cd D:\DevMate
+$env:UV_CACHE_DIR = ".uv-cache"
+uv sync
+```
+
+### 2. 启动完整本地栈
 
 ```powershell
 cd D:\DevMate
@@ -10,267 +40,147 @@ $env:UV_CACHE_DIR = ".uv-cache"
 uv run devmate --serve-stack
 ```
 
-This starts:
+这会同时启动：
 
-- MCP health: `http://localhost:8001/health`
+- MCP: `http://localhost:8001/health`
 - Web API: `http://127.0.0.1:8765`
 - Frontend: `http://127.0.0.1:5173`
 
-Press `Ctrl+C` once in that terminal to stop all three services together.
+## Docker 启动
 
-## Docker Deployment
-
-DevMate now includes a containerized stack for:
-
-- `devmate-mcp` on the internal Docker network
-- `devmate-web` on `http://localhost:8765`
-- `devmate-frontend` on `http://localhost:5173`
-
-1. Copy the example environment file and fill in your real keys:
+### 1. 准备环境变量
 
 ```powershell
 cd D:\DevMate
 Copy-Item compose.env.example .env
 ```
 
-2. Start the full stack:
+把 `.env` 里的这些值填好：
+
+- `MINIMAX_API_KEY`
+- `DASHSCOPE_API_KEY`
+- `TAVILY_API_KEY`
+- `LANGSMITH_API_KEY`（可选但推荐）
+
+### 2. 启动
 
 ```powershell
+cd D:\DevMate
 docker compose up --build
 ```
 
-3. Open the frontend:
+启动后可访问：
+
+- Frontend: `http://127.0.0.1:5173`
+- Web API: `http://127.0.0.1:8765`
+
+说明：
+
+- `devmate-web` 和 `devmate-mcp` 使用 [config.docker.toml](/D:/DevMate/config.docker.toml)
+- Docker 持久化目录包含：
+  - `.skills`
+  - `.sessions`
+  - `.chroma`
+  - `generated-output`
+  - `docs`
+  - `.runtime`
+
+## 前端可用能力
+
+当前 GUI 已支持：
+
+- 会话管理与多轮上下文
+- 实时流式规划 / 搜索 / 文件生成进度
+- 文件树与文件内容预览
+- Skills 浏览与导入
+- 本地文档上传
+- 前端界面填写 API Key
+- 前端界面切换模型
+
+设置页：
+
+- [http://127.0.0.1:5173/settings](http://127.0.0.1:5173/settings)
+
+Skills 页：
+
+- [http://127.0.0.1:5173/skills](http://127.0.0.1:5173/skills)
+
+## 演示流程
+
+推荐用这条 prompt 演示完整链路：
 
 ```text
-http://127.0.0.1:5173
+build a responsive map website with map sdk best practices
 ```
 
-Container notes:
+推荐验证点：
 
-- The backend services read [config.docker.toml](/D:/DevMate/config.docker.toml).
-- `/api` and `/api/chat/stream` are proxied through the frontend container by [frontend/nginx.conf](/D:/DevMate/frontend/nginx.conf).
-- Persistent app data lives in Docker volumes for `.skills`, `.sessions`, `generated-output`, and `.chroma`.
-- `devmate-mcp` no longer publishes `8001` to the host by default. The web service reaches it through Docker service discovery at `http://devmate-mcp:8001`.
+1. 右侧 `Context Panel` 出现规划步骤
+2. 搜索结果中能看到本地文档 / web results / skills
+3. 生成后文件树中出现多个文件
+4. 文件预览能读到真实内容
+5. 会话详情里能看到 LangSmith trace 链接
 
-## Demo Runbook
+## 生成结果如何打开
 
-Use this flow when you want one repeatable end-to-end demo:
+如果生成了一个静态项目目录，例如：
 
-1. Start the MCP server in Terminal 1:
+- [generated-output](/D:/DevMate/generated-output)
+
+最稳的查看方式是进入该目录后启动本地静态服务器：
 
 ```powershell
-cd D:\DevMate
-$env:UV_CACHE_DIR = ".uv-cache"
-uv run devmate --serve-mcp
+cd D:\DevMate\generated-output\<session-id>
+python -m http.server 9001
 ```
 
-2. Validate the local configuration in Terminal 2:
+然后浏览器打开：
 
-```powershell
-cd D:\DevMate
-$env:UV_CACHE_DIR = ".uv-cache"
-uv run devmate --config-check
-```
+- [http://127.0.0.1:9001](http://127.0.0.1:9001)
 
-Expected checkpoints:
+## LangSmith Trace
 
-- `MiniMax model configured: True`
-- `Embedding configured: True`
-- `Tavily configured: True`
-- `LangSmith configured: True`
+最近一次验证拿到的公开 trace 链接：
 
-3. Run one planning demo:
+- [Shared Trace](https://smith.langchain.com/public/6f00f954-8343-4c22-a98e-6e86606d0fc1/r)
 
-```powershell
-cd D:\DevMate
-$env:UV_CACHE_DIR = ".uv-cache"
-uv run devmate --prompt "build a responsive map website with map sdk best practices" --print-trace-url
-```
+说明：
 
-4. Run one generation demo:
+- 这条 trace 对应一次成功的端到端运行
+- 运行中包含模型规划、本地 RAG、MCP web search 和最终响应写回
 
-```powershell
-cd D:\DevMate
-$env:UV_CACHE_DIR = ".uv-cache"
-uv run devmate --prompt "build a responsive map website with map sdk best practices" --generate --output-dir generated-output --print-trace-url
-```
+## 当前交付判断
 
-Expected output highlights:
+按 [requirements.md](/D:/DevMate/requirements.md) 对照，当前已基本满足：
 
-- `Planning mode: llm`
-- `Local knowledge sources: ...`
-- `Matched skills: ...`
-- `LangSmith trace URL: ...`
-- `LangSmith shared trace URL: ...`
-- `Generated output dir: generated-output`
-
-`generated-output/` is ignored by Git and can be recreated for each demo run.
-`share_public_traces` is enabled by default in [config.toml](/D:/DevMate/config.toml) and [config.docker.toml](/D:/DevMate/config.docker.toml), so successful runs should produce a shareable LangSmith link automatically when LangSmith is configured.
-
-## Session Memory And Web UI
-
-DevMate now supports persisted local session history in `.sessions/`.
-
-Use one session id across multiple CLI prompts:
-
-```powershell
-cd D:\DevMate
-$env:UV_CACHE_DIR = ".uv-cache"
-uv run devmate --prompt "build a responsive map website" --session-id demo-1
-uv run devmate --prompt "refine the readme and mobile interactions" --session-id demo-1
-uv run devmate --list-sessions
-```
-
-Start the local web UI:
-
-```powershell
-cd D:\DevMate
-$env:UV_CACHE_DIR = ".uv-cache"
-uv run devmate --serve-web
-```
-
-Open `http://127.0.0.1:8765` in your browser.
-
-The web UI supports:
-
-- creating and browsing saved sessions
-- sending prompts with optional file generation
-- saving a skill name from the current run
-- viewing matched skills, local RAG sources, web results, and generated file changes
-
-DevMate 是一个面向面试题的 AI 编程助手项目骨架。当前仓库已经完成本地 Git 初始化，并补齐了可继续开发的目录结构、配置入口、占位源码、Docker 骨架和中文项目计划。
-
-## 当前目标
-
-项目最终需要交付一个可以完成以下工作的 Agent：
-
-- 接收自然语言需求
-- 通过 MCP 调用 Tavily 做联网搜索
-- 通过 RAG 检索本地文档
-- 生成或修改多文件代码项目
-- 记录并复用 Skills
-- 通过 Docker 一键启动
-
-## 当前状态
-
-当前仓库是“开发起步版”，主要解决三个问题：
-
-1. 仓库可被 Git 管理
-2. 目录结构和入口文件已就位
-3. 项目计划和实施顺序已经写清楚，便于继续开发
-
-## 环境要求
-
+- `uv` 管理
 - Python 3.13
-- `uv`
-- Docker Desktop
-- Tavily API Key
-- LangSmith 或 LangFuse 凭据
-- MiniMax API Key
+- `config.toml` 配置化
+- LangChain
+- MCP + Tavily + Streamable HTTP
+- RAG
+- Skills
+- Docker
+- Web UI
+- LangSmith
 
-当前机器实际环境仍有缺口：
+交付前最后建议：
 
-- 系统 Python 仍是 `3.10.9`
-- 项目已经通过 `uv sync` 建好 `.venv`
-- 当前项目虚拟环境使用的是 Python `3.13.9`
+1. 再跑一条成功 trace，替换 README 里的 trace 链接
+2. 提交并推送最新代码
 
-因此，这个仓库已经具备继续开发和联调的基础环境，但如果你要做系统级 Python 切换，仍然建议把本机默认 Python 也升级到 3.13。
+## 开发验证
 
-## 建议启动顺序
-
-1. 安装 Python 3.13
-2. 安装 `uv`
-3. 使用 `uv sync` 安装依赖
-4. 填写 [config.toml](/D:/DevMate/config.toml)
-5. 运行 `uv run devmate --prompt "帮我规划一个 FastAPI 服务"`
-
-建议把真实密钥写到未跟踪的 `config.local.toml`，仓库内的 [config.toml](/D:/DevMate/config.toml) 保持占位模板即可。加载顺序是：先读 `config.toml`，如果存在 `config.local.toml`，再用本地配置覆盖同名字段。
-
-当前默认模型配置已经切到 `MiniMax-M2`，并按 MiniMax 官方的 OpenAI 兼容接口模板设置了基础地址。国际站默认地址是 `https://api.minimax.io/v1`；如果你使用的是中国大陆站点，可以改成 `https://api.minimaxi.com/v1`。
-
-## MCP 最小联调
-
-MCP 搜索链路当前已经有最小实现，默认走 `Streamable HTTP + Tavily`。
-
-1. 在 [config.toml](/D:/DevMate/config.toml) 里填好 `tavily_api_key`
-2. 开一个终端启动 MCP server
-3. 再开一个终端通过 MCP client 发起一次搜索
-
-可调参数：
-
-- `[search].default_max_results`
-- `[search].request_timeout_seconds`
-- `[mcp].tool_timeout_seconds`
-- `[mcp].healthcheck_timeout_seconds`
-
-启动 server：
+后端测试：
 
 ```powershell
-uv run devmate --serve-mcp
+cd D:\DevMate
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-如果提示端口已占用，先关闭旧的 8001 端口进程，再重新启动 MCP server。
-
-测试 client：
+前端构建：
 
 ```powershell
-uv run devmate --mcp-query "latest FastAPI release notes"
+cd D:\DevMate\frontend
+pnpm build
 ```
-
-现在 `uv run devmate --prompt "..."` 这条路径也会尝试先走 MCP 搜索，再结合本地 RAG 结果生成摘要；如果 MCP server 不可用，它会记录 warning 并优雅降级，不会直接把 CLI 弄崩。
-
-如果本机 `uv` 缓存目录权限有问题，可以临时改用项目内缓存目录：
-
-```powershell
-$env:UV_CACHE_DIR = ".uv-cache"
-uv run devmate
-```
-
-## 目录结构
-
-```text
-.
-├─ .skills/
-├─ docs/
-├─ src/
-│  └─ devmate/
-│     ├─ __init__.py
-│     ├─ __main__.py
-│     ├─ agent_runtime.py
-│     ├─ config_loader.py
-│     ├─ logging_config.py
-│     ├─ main.py
-│     ├─ mcp_client.py
-│     ├─ mcp_server.py
-│     ├─ rag_pipeline.py
-│     └─ skill_registry.py
-├─ tests/
-├─ Dockerfile
-├─ docker-compose.yml
-├─ pyproject.toml
-├─ config.toml
-└─ 项目计划.md
-```
-
-## 关键文件
-
-- [pyproject.toml](/D:/DevMate/pyproject.toml): Python 项目和依赖定义
-- [config.toml](/D:/DevMate/config.toml): 项目配置模板
-- [项目计划.md](/D:/DevMate/项目计划.md): 适合直接查看的中文计划
-- [docs/architecture.md](/D:/DevMate/docs/architecture.md): 架构说明
-- [docs/internal_frontend_guidelines.md](/D:/DevMate/docs/internal_frontend_guidelines.md): 用于后续 RAG 演示的样例文档
-
-## 下一步
-
-如果你要继续做这个项目，建议先做这三个动作：
-
-1. 把本机环境升级到 Python 3.13 + `uv`
-2. 按 [项目计划.md](/D:/DevMate/项目计划.md) 完成 Day 1 基础工程
-3. 当前默认技术路线为 `LangChain + MiniMax-M2 + Tavily + ChromaDB + LangSmith`
-
-## 骨架说明
-
-当前源码采用“平铺启动模块 + 预留目录”的方式：
-
-- `src/devmate/*.py` 是当前可直接继续开发的骨架模块
-- `src/devmate/agent`、`src/devmate/config`、`src/devmate/mcp`、`src/devmate/rag`、`src/devmate/skills` 是后续可以迁入正式实现的预留目录

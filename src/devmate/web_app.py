@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from anyio import to_thread
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
@@ -147,11 +148,13 @@ def create_app(
         session_id = payload.session_id or store.create_session().session_id
         started_at = trace_start_time()
         output_dir = _resolve_output_dir(payload.output_dir, session_id)
-        result = current_runtime().handle_prompt(
-            prompt,
-            save_skill_name=payload.save_skill_name,
-            generate_output_dir=output_dir if payload.generate else None,
-            session_id=session_id,
+        result = await to_thread.run_sync(
+            lambda: current_runtime().handle_prompt(
+                prompt,
+                save_skill_name=payload.save_skill_name,
+                generate_output_dir=output_dir if payload.generate else None,
+                session_id=session_id,
+            )
         )
         trace = _resolve_trace_payload(current_settings(), started_at)
         if trace:

@@ -36,5 +36,6 @@ test_scratch/
 .sessions/
 generated-output/
 .runtime/
+.docker-temp/
 
 node_modules/
