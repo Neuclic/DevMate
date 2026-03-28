@@ -164,10 +164,12 @@ python -m http.server 9001
 - Web UI
 - LangSmith
 
-交付前最后建议：
+当前仓库已完成最终交付收口：
 
-1. 再跑一条成功 trace，替换 README 里的 trace 链接
-2. 提交并推送最新代码
+1. GitHub 仓库包含清晰的多次提交历史
+2. README 已包含本地启动、Docker 启动、演示步骤和公开 Trace 链接
+3. Docker 可启动 `MCP + Web API + Frontend`
+4. LangSmith 公开 Trace 已验证可访问
 
 ## 开发验证
 
