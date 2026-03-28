@@ -19,6 +19,11 @@ interface ChatStore {
   upsertPlanningStep: (sessionId: string, messageId: string, step: PlanStep) => void;
   setSearchResults: (sessionId: string, messageId: string, results: SearchResult[]) => void;
   appendGeneratedFile: (sessionId: string, messageId: string, file: FileNode) => void;
+  setTraceInfo: (
+    sessionId: string,
+    messageId: string,
+    trace: NonNullable<Message["metadata"]>["trace"],
+  ) => void;
   setActiveStreamingSessionId: (sessionId: string | null) => void;
 }
 
@@ -127,6 +132,22 @@ export const useChatStore = create<ChatStore>((set) => ({
             },
           };
         }),
+      ),
+    })),
+  setTraceInfo: (sessionId, messageId, trace) =>
+    set((state) => ({
+      messagesBySession: updateSessionMessages(state, sessionId, (messages) =>
+        messages.map((message) =>
+          message.id === messageId
+            ? {
+                ...message,
+                metadata: {
+                  ...message.metadata,
+                  trace,
+                },
+              }
+            : message,
+        ),
       ),
     })),
   setActiveStreamingSessionId: (activeStreamingSessionId) => set({ activeStreamingSessionId }),

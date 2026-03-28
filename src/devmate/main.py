@@ -474,13 +474,19 @@ def main() -> int:
                 LOGGER.info("Modified files: %s", ", ".join(result.generated_modified_files))
         if result.generation_error:
             LOGGER.warning("Generation model error: %s", result.generation_error)
-        if args.print_trace_url or args.share_trace:
+        if args.print_trace_url or args.share_trace or settings.langsmith.share_public_traces:
             trace = latest_trace_info(
                 settings,
                 started_at=started_at,
                 share_public=args.share_trace or settings.langsmith.share_public_traces,
             )
             if trace is not None:
+                if result.session_id:
+                    session_store.update_latest_turn_trace(
+                        result.session_id,
+                        trace_url=trace.run_url,
+                        shared_trace_url=trace.shared_url,
+                    )
                 LOGGER.info("LangSmith trace URL: %s", trace.run_url)
                 if trace.shared_url:
                     LOGGER.info("LangSmith shared trace URL: %s", trace.shared_url)

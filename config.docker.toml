@@ -37,7 +37,7 @@ langchain_tracing_v2 = true
 langchain_api_key = "${LANGSMITH_API_KEY}"
 project_name = "DevMate"
 endpoint = "${LANGSMITH_ENDPOINT}"
-share_public_traces = false
+share_public_traces = true
 
 [skills]
 skills_dir = "/app/.skills"

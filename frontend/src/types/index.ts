@@ -1,4 +1,4 @@
-﻿export interface Session {
+export interface Session {
   id: string;
   title: string;
   created_at: string;
@@ -18,6 +18,10 @@ export interface Message {
     planning_steps?: PlanStep[] | undefined;
     search_results?: SearchResult[] | undefined;
     generated_files?: FileNode[] | undefined;
+    trace?: {
+      trace_url?: string | undefined;
+      shared_trace_url?: string | undefined;
+    } | undefined;
   } | undefined;
 }
 
@@ -71,7 +75,7 @@ export type ChatStreamEvent =
   | { type: "planning"; step: PlanStep }
   | { type: "search"; results: SearchResult[] }
   | { type: "file"; file: FileNode }
-  | { type: "complete"; summary: string }
+  | { type: "complete"; summary: string; trace_url?: string; shared_trace_url?: string }
   | { type: "error"; message: string };
 
 export type ContextTab = "planning" | "search" | "files" | "skills";
@@ -90,4 +94,26 @@ export interface UiSettings {
     web: boolean;
     skill: boolean;
   };
+}
+
+export interface ModelOption {
+  label: string;
+  value: string;
+  base_url: string;
+}
+
+export interface RuntimeSettings {
+  model_name: string;
+  ai_base_url: string;
+  api_key: string;
+  embedding_model_name: string;
+  embedding_base_url: string;
+  embedding_api_key: string;
+  search_limit: number;
+  share_public_traces: boolean;
+  available_models: ModelOption[];
+}
+
+export interface UploadResponse {
+  saved_files: string[];
 }

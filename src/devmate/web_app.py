@@ -2,20 +2,32 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
+import logging
 from pathlib import Path
+import re
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 import uvicorn
 
 from devmate.agent_runtime import DevMateRuntime
 from devmate.config_loader import AppSettings
+from devmate.observability import latest_trace_info, trace_start_time
 from devmate.session_store import SessionRecord, SessionStore, SessionSummary, SessionTurn
-from devmate.skill_registry import SkillRegistry
+from devmate.skill_registry import SkillNote, SkillRegistry
+
+LOGGER = logging.getLogger(__name__)
+RUNTIME_STATE_PATH = Path(".runtime") / "ui-settings.json"
+AVAILABLE_MODELS = [
+    {"label": "MiniMax M2", "value": "MiniMax-M2", "base_url": "https://api.minimaxi.com/v1"},
+    {"label": "MiniMax Text 01", "value": "MiniMax-Text-01", "base_url": "https://api.minimaxi.com/v1"},
+    {"label": "GPT-4.1 mini", "value": "gpt-4.1-mini", "base_url": "https://api.openai.com/v1"},
+    {"label": "GPT-4.1", "value": "gpt-4.1", "base_url": "https://api.openai.com/v1"},
+]
 
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -51,7 +63,7 @@ class ChatRequest(BaseModel):
     prompt: str | None = None
     message: str | None = None
     generate: bool = True
-    output_dir: str = "generated-output"
+    output_dir: str | None = None
     save_skill_name: str | None = None
 
     @model_validator(mode="after")
@@ -65,6 +77,21 @@ class ChatRequest(BaseModel):
         return (self.message or self.prompt or "").strip()
 
 
+class RuntimeSettingsPayload(BaseModel):
+    model_name: str = Field(min_length=1)
+    ai_base_url: str = Field(min_length=1)
+    api_key: str = ""
+    embedding_model_name: str = ""
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    search_limit: int = Field(default=5, ge=1, le=20)
+    share_public_traces: bool = False
+
+
+class RuntimeSettingsResponse(RuntimeSettingsPayload):
+    available_models: list[dict[str, str]]
+
+
 def create_app(
     settings: AppSettings,
     *,
@@ -72,9 +99,22 @@ def create_app(
     session_store: SessionStore | None = None,
 ) -> FastAPI:
     store = session_store or SessionStore(Path(".sessions"))
-    active_runtime = runtime or DevMateRuntime(settings=settings, session_store=store)
-    skill_registry = active_runtime.skill_registry
+    initial_settings = _apply_runtime_overrides(settings, _load_runtime_overrides(RUNTIME_STATE_PATH))
+    state: dict[str, Any] = {
+        "settings": initial_settings,
+        "runtime": runtime or DevMateRuntime(settings=initial_settings, session_store=store),
+    }
     app = FastAPI(title="DevMate API")
+
+    def current_runtime() -> DevMateRuntime:
+        return state["runtime"]
+
+    def current_settings() -> AppSettings:
+        return state["settings"]
+
+    def rebuild_runtime(new_settings: AppSettings) -> None:
+        state["settings"] = new_settings
+        state["runtime"] = DevMateRuntime(settings=new_settings, session_store=store)
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
@@ -105,18 +145,29 @@ def create_app(
     async def chat(payload: ChatRequest) -> dict[str, object]:
         prompt = payload.effective_prompt
         session_id = payload.session_id or store.create_session().session_id
-        result = active_runtime.handle_prompt(
+        started_at = trace_start_time()
+        output_dir = _resolve_output_dir(payload.output_dir, session_id)
+        result = current_runtime().handle_prompt(
             prompt,
             save_skill_name=payload.save_skill_name,
-            generate_output_dir=Path(payload.output_dir) if payload.generate else None,
+            generate_output_dir=output_dir if payload.generate else None,
             session_id=session_id,
         )
+        trace = _resolve_trace_payload(current_settings(), started_at)
+        if trace:
+            store.update_latest_turn_trace(
+                session_id,
+                trace_url=trace.get("trace_url"),
+                shared_trace_url=trace.get("shared_trace_url"),
+            )
         session = _get_session_or_404(store, session_id)
+        message = _assistant_message_payload(session_id, session.turns[-1] if session.turns else None)
         return {
             "session_id": session_id,
             "result": asdict(result),
-            "message": _assistant_message_payload(session_id, session.turns[-1] if session.turns else None),
+            "message": message,
             "session": _session_detail_payload(session),
+            "trace": trace,
         }
 
     @app.get("/api/chat/stream")
@@ -124,22 +175,43 @@ def create_app(
         session_id: str,
         message: str,
         generate: bool = True,
-        output_dir: str = "generated-output",
+        output_dir: str | None = None,
         save_skill_name: str | None = None,
     ) -> StreamingResponse:
         def event_stream():
-            for event in active_runtime.stream_prompt(
+            started_at = trace_start_time()
+            pending_complete: dict[str, object] | None = None
+            resolved_output_dir = _resolve_output_dir(output_dir, session_id)
+            for event in current_runtime().stream_prompt(
                 message,
                 save_skill_name=save_skill_name,
-                generate_output_dir=Path(output_dir) if generate else None,
+                generate_output_dir=resolved_output_dir if generate else None,
                 session_id=session_id,
             ):
+                if event.get("type") == "complete":
+                    pending_complete = dict(event)
+                    continue
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            if pending_complete is not None:
+                trace = _resolve_trace_payload(current_settings(), started_at)
+                if trace:
+                    store.update_latest_turn_trace(
+                        session_id,
+                        trace_url=trace.get("trace_url"),
+                        shared_trace_url=trace.get("shared_trace_url"),
+                    )
+                if trace:
+                    pending_complete.update(trace)
+                yield f"data: {json.dumps(pending_complete, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(
             event_stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            media_type="text/event-stream; charset=utf-8",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Content-Type": "text/event-stream; charset=utf-8",
+            },
         )
 
     @app.get("/api/files/content")
@@ -179,22 +251,71 @@ def create_app(
             )
         return files
 
+    @app.get("/api/settings")
+    async def get_settings() -> dict[str, object]:
+        return _settings_payload(current_settings())
+
+    @app.put("/api/settings")
+    async def update_settings(payload: RuntimeSettingsPayload) -> dict[str, object]:
+        overrides = {
+            "model_name": payload.model_name,
+            "ai_base_url": payload.ai_base_url,
+            "api_key": payload.api_key,
+            "embedding_model_name": payload.embedding_model_name,
+            "embedding_base_url": payload.embedding_base_url,
+            "embedding_api_key": payload.embedding_api_key,
+            "search_limit": payload.search_limit,
+            "share_public_traces": payload.share_public_traces,
+        }
+        _save_runtime_overrides(RUNTIME_STATE_PATH, overrides)
+        new_settings = _apply_runtime_overrides(settings, overrides)
+        rebuild_runtime(new_settings)
+        return _settings_payload(new_settings)
+
+    @app.post("/api/uploads/docs")
+    async def upload_docs(files: list[UploadFile] = File(...)) -> dict[str, object]:
+        docs_dir = Path(current_settings().app.docs_dir)
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        saved_files: list[str] = []
+        for upload in files:
+            if not upload.filename:
+                continue
+            filename = Path(upload.filename).name
+            target = docs_dir / filename
+            content = await upload.read()
+            target.write_bytes(content)
+            saved_files.append(str(target.resolve()))
+        return {"saved_files": saved_files}
+
+    @app.post("/api/uploads/skills")
+    async def upload_skills(files: list[UploadFile] = File(...), name: str | None = Form(None)) -> dict[str, object]:
+        registry = current_runtime().skill_registry
+        saved_files: list[str] = []
+        for upload in files:
+            if not upload.filename:
+                continue
+            raw = (await upload.read()).decode("utf-8", errors="ignore")
+            note = _skill_note_from_upload(upload.filename, raw, name=name)
+            saved_files.append(str(registry.save(note).resolve()))
+        return {"saved_files": saved_files}
+
     @app.get("/api/skills")
     async def list_skills(search: str | None = None, type: str | None = None) -> list[dict[str, object]]:
         del type
-        notes = skill_registry.search(search or "", limit=50) if search else skill_registry.list_skills()
+        registry = current_runtime().skill_registry
+        notes = registry.search(search or "", limit=50) if search else registry.list_skills()
         return [_skill_payload(note) for note in notes]
 
     @app.get("/api/skills/{skill_id}")
     async def get_skill(skill_id: str) -> dict[str, object]:
-        note = skill_registry.load(skill_id)
+        note = current_runtime().skill_registry.load(skill_id)
         if note is None:
             raise HTTPException(status_code=404, detail="Skill not found.")
         return _skill_payload(note)
 
     @app.delete("/api/skills/{skill_id}", status_code=204)
     async def delete_skill(skill_id: str) -> None:
-        note = skill_registry.load(skill_id)
+        note = current_runtime().skill_registry.load(skill_id)
         if note is None or note.source_path is None:
             raise HTTPException(status_code=404, detail="Skill not found.")
         skill_path = Path(note.source_path)
@@ -208,6 +329,12 @@ def create_app(
             skill_root.rmdir()
 
     return app
+
+
+def _resolve_output_dir(output_dir: str | None, session_id: str) -> Path:
+    if output_dir and output_dir.strip():
+        return Path(output_dir)
+    return Path("generated-output") / session_id
 
 
 def _get_session_or_404(store: SessionStore, session_id: str) -> SessionRecord:
@@ -288,8 +415,36 @@ def _assistant_message_payload(session_id: str, turn: SessionTurn | None) -> dic
             ],
             "search_results": search_results,
             "generated_files": generated_files,
+            "trace": {
+                key: value
+                for key, value in {
+                    "trace_url": turn.trace_url,
+                    "shared_trace_url": turn.shared_trace_url,
+                }.items()
+                if value
+            }
+            or None,
         },
     }
+
+
+def _resolve_trace_payload(settings: AppSettings, started_at) -> dict[str, str] | None:
+    try:
+        trace = latest_trace_info(
+            settings,
+            started_at=started_at,
+            share_public=settings.langsmith.share_public_traces,
+        )
+    except Exception as exc:
+        LOGGER.warning("Unable to resolve LangSmith trace URL: %s", exc)
+        return None
+    if trace is None:
+        return None
+
+    payload: dict[str, str] = {"trace_url": trace.run_url}
+    if trace.shared_url:
+        payload["shared_trace_url"] = trace.shared_url
+    return payload
 
 
 def _session_detail_payload(record: SessionRecord) -> dict[str, object]:
@@ -349,6 +504,89 @@ def _resolve_file_path(store: SessionStore, path: str, session_id: str | None) -
         if file_path.exists():
             return file_path
     return None
+
+
+def _load_runtime_overrides(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        LOGGER.warning("Unable to read runtime overrides: %s", exc)
+        return {}
+
+
+def _save_runtime_overrides(path: Path, overrides: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(overrides, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _apply_runtime_overrides(settings: AppSettings, overrides: dict[str, object]) -> AppSettings:
+    if not overrides:
+        return settings
+    model = replace(
+        settings.model,
+        model_name=str(overrides.get("model_name") or settings.model.model_name),
+        ai_base_url=str(overrides.get("ai_base_url") or settings.model.ai_base_url),
+        api_key=str(overrides.get("api_key") or settings.model.api_key),
+        embedding_model_name=str(overrides.get("embedding_model_name") or settings.model.embedding_model_name),
+        embedding_base_url=str(overrides.get("embedding_base_url") or settings.model.embedding_base_url),
+        embedding_api_key=str(overrides.get("embedding_api_key") or settings.model.embedding_api_key),
+    )
+    search = replace(
+        settings.search,
+        default_max_results=int(overrides.get("search_limit") or settings.search.default_max_results),
+    )
+    langsmith = replace(
+        settings.langsmith,
+        share_public_traces=bool(overrides.get("share_public_traces", settings.langsmith.share_public_traces)),
+    )
+    return replace(settings, model=model, search=search, langsmith=langsmith)
+
+
+def _settings_payload(settings: AppSettings) -> dict[str, object]:
+    return {
+        "model_name": settings.model.model_name,
+        "ai_base_url": settings.model.ai_base_url,
+        "api_key": settings.model.api_key,
+        "embedding_model_name": settings.model.embedding_model_name,
+        "embedding_base_url": settings.model.embedding_base_url,
+        "embedding_api_key": settings.model.embedding_api_key,
+        "search_limit": settings.search.default_max_results,
+        "share_public_traces": settings.langsmith.share_public_traces,
+        "available_models": AVAILABLE_MODELS,
+    }
+
+
+def _skill_note_from_upload(filename: str, raw: str, *, name: str | None = None) -> SkillNote:
+    stem = Path(filename).stem.replace("-", " ").replace("_", " ").strip() or "Uploaded Skill"
+    heading = next((line[2:].strip() for line in raw.splitlines() if line.startswith("# ")), "")
+    resolved_name = (name or heading or stem).strip()
+    body_lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    summary = next(
+        (
+            line
+            for line in body_lines
+            if not line.startswith(("#", "-", "*"))
+            and not re.match(r"^\d+\.", line)
+        ),
+        f"Imported from {filename}",
+    )
+    steps = [
+        re.sub(r"^(\d+\.\s*|[-*]\s*)", "", line).strip()
+        for line in raw.splitlines()
+        if re.match(r"^(\d+\.\s*|[-*]\s+)", line.strip())
+    ]
+    keywords = [token.lower() for token in re.findall(r"[A-Za-z0-9_]+", resolved_name) if token]
+    if not steps:
+        steps = ["Review the uploaded skill content and apply it to a matching task."]
+    return SkillNote(
+        name=resolved_name,
+        summary=summary,
+        steps=steps[:12],
+        keywords=keywords[:8],
+        tools=["search_saved_skills", "read_saved_skill"],
+    )
 
 
 def _skill_payload(note: Any) -> dict[str, object]:

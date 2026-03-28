@@ -1,4 +1,4 @@
-﻿import { useCallback, useRef } from "react";
+import { useCallback, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { apiClient } from "@/lib/api-client";
@@ -45,6 +45,7 @@ export function useChatStream() {
   const upsertPlanningStep = useChatStore((state) => state.upsertPlanningStep);
   const setSearchResults = useChatStore((state) => state.setSearchResults);
   const appendGeneratedFile = useChatStore((state) => state.appendGeneratedFile);
+  const setTraceInfo = useChatStore((state) => state.setTraceInfo);
   const setActiveStreamingSessionId = useChatStore((state) => state.setActiveStreamingSessionId);
 
   const hydrateFromResponse = useCallback(
@@ -63,8 +64,11 @@ export function useChatStream() {
           appendGeneratedFile(sessionId, placeholderId, file);
         }
       }
+      if (response.message.metadata?.trace) {
+        setTraceInfo(sessionId, placeholderId, response.message.metadata.trace);
+      }
     },
-    [appendGeneratedFile, setSearchResults, updateAssistantStatus, upsertPlanningStep],
+    [appendGeneratedFile, setSearchResults, setTraceInfo, updateAssistantStatus, upsertPlanningStep],
   );
 
   const stop = useCallback(() => {
@@ -128,6 +132,12 @@ export function useChatStream() {
                 break;
               case "complete":
                 settled = true;
+                if (event.trace_url || event.shared_trace_url) {
+                  setTraceInfo(sessionId, assistantMessage.id, {
+                    trace_url: event.trace_url,
+                    shared_trace_url: event.shared_trace_url,
+                  });
+                }
                 updateAssistantStatus(
                   sessionId,
                   assistantMessage.id,
@@ -168,6 +178,7 @@ export function useChatStream() {
       queryClient,
       setActiveStreamingSessionId,
       setSearchResults,
+      setTraceInfo,
       updateAssistantStatus,
       upsertPlanningStep,
     ],

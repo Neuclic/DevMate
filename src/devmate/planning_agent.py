@@ -325,6 +325,7 @@ class PlanningAgent:
             "You are DevMate, a coding assistant planning agent. "
             "Use tools only when they materially improve the plan. "
             "If the user message is a follow-up, preserve continuity with the recent conversation. "
+            "If the latest user request clearly asks for a different artifact, style, or domain, prioritize the latest request over earlier context. "
             "Use search_local_knowledge for local docs, templates, and coding guidelines. "
             "Use search_saved_skills to find prior task patterns, then use read_saved_skill on the best match before relying on it. "
             "Use search_web for latest external facts, best practices, libraries, or release notes. "
@@ -346,11 +347,12 @@ class PlanningAgent:
             {
                 "role": "system",
                 "content": (
-                    "You are DevMate, a planning agent for a coding assistant. "
-                    "Turn the user request plus retrieved context into a concrete implementation plan. "
-                    "Return JSON only with the keys: summary, planned_files, implementation_steps. "
-                    "summary must be one short sentence. "
-                    "planned_files must be a list of repo-relative paths. "
+                "You are DevMate, a planning agent for a coding assistant. "
+                "Turn the user request plus retrieved context into a concrete implementation plan. "
+                "If the latest user request conflicts with earlier session history, follow the latest explicit request. "
+                "Return JSON only with the keys: summary, planned_files, implementation_steps. "
+                "summary must be one short sentence. "
+                "planned_files must be a list of repo-relative paths. "
                     "implementation_steps must be a list of 3 to 6 short actionable steps."
                 ),
             },

@@ -24,12 +24,19 @@ class FakeMessage:
 class FakeModel:
     """Fake model that returns a fixed JSON payload."""
 
-    def __init__(self, content: str) -> None:
-        self.content = content
+    def __init__(self, file_contents: dict[str, str]) -> None:
+        self.file_contents = file_contents
 
     def invoke(self, messages: object) -> FakeMessage:
-        del messages
-        return FakeMessage(self.content)
+        prompt = str(messages[-1]["content"])
+        marker = "Target file:\n"
+        start = prompt.find(marker)
+        if start == -1:
+            return FakeMessage("")
+        start += len(marker)
+        end = prompt.find("\n", start)
+        path = prompt[start:end].strip()
+        return FakeMessage(self.file_contents.get(path, ""))
 
 
 def _make_test_root() -> Path:
@@ -137,12 +144,10 @@ def test_project_generator_writes_model_generated_files() -> None:
         _write_config(config_path)
         settings = load_settings(config_path)
         model = FakeModel(
-            """{
-  \"files\": [
-    {\"path\": \"index.html\", \"content\": \"<h1>Hello</h1>\"},
-    {\"path\": \"README.md\", \"content\": \"# Demo\"}
-  ]
-}"""
+            {
+                "index.html": "<h1>Hello</h1>",
+                "README.md": "# Demo",
+            }
         )
         generator = ProjectGenerator(settings, model=model)
 
@@ -248,3 +253,116 @@ def test_browser_game_prompt_keeps_existing_web_scaffold_paths_without_duplicati
         "flappy-bird/game.js",
         "README.md",
     ]
+
+
+def test_static_visual_prompt_does_not_fall_back_to_browser_game() -> None:
+    root = _make_test_root()
+    try:
+        config_path = root / "config.toml"
+        _write_config(config_path)
+        settings = load_settings(config_path)
+        object.__setattr__(settings.model, "api_key", "your_minimax_api_key_here")
+        generator = ProjectGenerator(settings)
+        plan = AgentPlan(
+            summary="Create a static front-end visual page.",
+            planned_files=["index.html"],
+            implementation_steps=["Create the page."],
+            used_model=False,
+        )
+
+        normalized = generator.normalize_plan(
+            "写一个静态的前端界面绘制一个美少女，拥有全世界都想守护的笑容",
+            plan,
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert normalized.planned_files == [
+        "index.html",
+        "styles.css",
+        "js/app.js",
+        "README.md",
+    ]
+    assert all("Flappy Bird" not in step for step in normalized.implementation_steps)
+
+
+def test_static_site_template_respects_planned_asset_paths() -> None:
+    root = _make_test_root()
+    try:
+        config_path = root / "config.toml"
+        _write_config(config_path)
+        settings = load_settings(config_path)
+        object.__setattr__(settings.model, "api_key", "your_minimax_api_key_here")
+        generator = ProjectGenerator(settings)
+        plan = AgentPlan(
+            summary="Create a static poster page.",
+            planned_files=["index.html", "css/style.css", "js/main.js", "README.md"],
+            implementation_steps=["Create the page."],
+            used_model=False,
+        )
+
+        result = generator.generate_project(
+            "写一个静态的前端界面，展示一个拥有温暖笑容的美少女海报页",
+            plan,
+            output_dir=root / "out",
+        )
+
+        index_content = (root / "out" / "index.html").read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert result.files[0].path == "index.html"
+    assert 'href="css/style.css"' in index_content
+    assert 'src="js/main.js"' in index_content
+
+
+def test_project_generator_strips_think_blocks_and_file_headers_from_model_output() -> None:
+    root = _make_test_root()
+    try:
+        config_path = root / "config.toml"
+        _write_config(config_path)
+        settings = load_settings(config_path)
+        model = FakeModel(
+            {
+                "index.html": (
+                    "<think>\nreasoning here\n</think>\n\n"
+                    "index.html\n"
+                    "<!DOCTYPE html>\n"
+                    "<html><body><h1>Poster</h1></body></html>\n"
+                    "css/style.css\n"
+                    "body { color: red; }\n"
+                ),
+                "README.md": (
+                    "<think>extra thoughts</think>\n"
+                    "README.md\n"
+                    "# Demo Poster\n\n"
+                    "- Open index.html in a browser.\n"
+                ),
+            }
+        )
+        generator = ProjectGenerator(settings, model=model)
+        plan = AgentPlan(
+            summary="Create a static poster page.",
+            planned_files=["index.html", "css/style.css", "js/main.js", "README.md"],
+            implementation_steps=["Create the page."],
+            used_model=True,
+        )
+
+        result = generator.generate_project(
+            "build a static poster site",
+            plan,
+            output_dir=root / "out",
+        )
+
+        index_content = (root / "out" / "index.html").read_text(encoding="utf-8")
+        readme_content = (root / "out" / "README.md").read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert result.used_model is True
+    assert "<think>" not in index_content
+    assert "css/style.css" not in index_content
+    assert index_content.startswith("<!DOCTYPE html>")
+    assert "<think>" not in readme_content
+    assert readme_content.startswith("# Demo Poster")
+    assert "index.html" not in readme_content

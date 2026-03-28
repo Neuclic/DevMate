@@ -34,6 +34,7 @@ export function ContextPanel() {
   const searchResults = latestAssistantMessage?.metadata?.search_results ?? [];
   const generatedFiles = latestAssistantMessage?.metadata?.generated_files ?? [];
   const skillResults = searchResults.filter((result) => result.source === "skill");
+  const trace = latestAssistantMessage?.metadata?.trace;
 
   return (
     <aside className="flex h-full flex-col bg-card/70">
@@ -44,6 +45,31 @@ export function ContextPanel() {
         <p className="mt-1 text-sm text-muted-foreground">
           实时查看规划、检索、文件和技能命中。
         </p>
+        {trace?.shared_trace_url || trace?.trace_url ? (
+          <div className="mt-3 rounded-xl border border-border bg-background/80 p-3 text-sm">
+            <p className="font-medium text-foreground">LangSmith Trace</p>
+            {trace.shared_trace_url ? (
+              <a
+                className="mt-2 block truncate text-primary underline underline-offset-4"
+                href={trace.shared_trace_url}
+                rel="noreferrer"
+                target="_blank"
+              >
+                公开分享链接
+              </a>
+            ) : null}
+            {trace.trace_url ? (
+              <a
+                className="mt-1 block truncate text-muted-foreground underline underline-offset-4"
+                href={trace.trace_url}
+                rel="noreferrer"
+                target="_blank"
+              >
+                原始 Trace 链接
+              </a>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden px-4 py-3">

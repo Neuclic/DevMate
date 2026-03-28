@@ -56,6 +56,8 @@ class SessionTurn:
     generation_used_model: bool = False
     generation_error: str | None = None
     saved_skill_path: str | None = None
+    trace_url: str | None = None
+    shared_trace_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -174,6 +176,36 @@ class SessionStore:
             )
             for turn in turns
         ]
+
+    def update_latest_turn_trace(
+        self,
+        session_id: str,
+        *,
+        trace_url: str | None,
+        shared_trace_url: str | None,
+    ) -> SessionRecord | None:
+        """Update the most recent turn with LangSmith trace links."""
+        record = self.get_session(session_id)
+        if record is None or not record.turns:
+            return None
+
+        latest = record.turns[-1]
+        updated_turn = SessionTurn(
+            **{
+                **asdict(latest),
+                "trace_url": trace_url,
+                "shared_trace_url": shared_trace_url,
+            }
+        )
+        updated = SessionRecord(
+            session_id=record.session_id,
+            title=record.title,
+            created_at=record.created_at,
+            updated_at=_utc_now(),
+            turns=[*record.turns[:-1], updated_turn],
+        )
+        self._write(updated)
+        return updated
 
     def _session_path(self, session_id: str) -> Path:
         return self.sessions_dir / f"{session_id}.json"

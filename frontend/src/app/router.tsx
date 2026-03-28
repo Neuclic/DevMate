@@ -31,7 +31,7 @@ function SettingsRoute() {
       <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-4 pb-6">
         <div>
           <h1 className="text-3xl font-semibold">设置</h1>
-          <p className="mt-1 text-sm text-muted-foreground">这些设置会保存在本地浏览器中，便于演示和调试。</p>
+          <p className="mt-1 text-sm text-muted-foreground">这里的模型、API Key 和知识文档会直接写到后端运行时，而不只是浏览器本地状态。</p>
         </div>
         <NavLink className="text-sm font-medium text-brand hover:underline" to="/">
           返回工作台

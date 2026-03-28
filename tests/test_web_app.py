@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -172,6 +173,82 @@ def test_chat_stream_emits_incremental_events() -> None:
     assert events[-1]["summary"] == "Completed stream."
 
 
+def test_chat_stream_complete_event_includes_trace_links(monkeypatch) -> None:
+    root = _make_test_root()
+    try:
+        docs_dir = root / "docs"
+        skills_dir = root / ".skills"
+        docs_dir.mkdir()
+        skills_dir.mkdir()
+        config_path = root / "config.toml"
+        _write_config(config_path, docs_dir=docs_dir, skills_dir=skills_dir)
+        settings = load_settings(config_path)
+        store = SessionStore(root / ".sessions")
+        runtime = FakeRuntime(SkillRegistry(skills_dir))
+        monkeypatch.setattr(
+            "devmate.web_app.latest_trace_info",
+            lambda *args, **kwargs: SimpleNamespace(
+                run_url="https://smith.langchain.com/public/run",
+                shared_url="https://smith.langchain.com/public/share",
+            ),
+        )
+        app = create_app(settings, runtime=runtime, session_store=store)
+        client = TestClient(app)
+
+        session = client.post("/api/sessions", json={"title": "Stream Demo"}).json()
+        response = client.get(
+            "/api/chat/stream",
+            params={"session_id": session["id"], "message": "stream this"},
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    events = [
+        json.loads(chunk.removeprefix("data: "))
+        for chunk in response.text.split("\n\n")
+        if chunk.startswith("data: ")
+    ]
+    assert events[-1]["type"] == "complete"
+    assert events[-1]["trace_url"] == "https://smith.langchain.com/public/run"
+    assert events[-1]["shared_trace_url"] == "https://smith.langchain.com/public/share"
+
+
+def test_chat_response_includes_trace_payload(monkeypatch) -> None:
+    root = _make_test_root()
+    try:
+        docs_dir = root / "docs"
+        skills_dir = root / ".skills"
+        docs_dir.mkdir()
+        skills_dir.mkdir()
+        config_path = root / "config.toml"
+        _write_config(config_path, docs_dir=docs_dir, skills_dir=skills_dir)
+        settings = load_settings(config_path)
+        store = SessionStore(root / ".sessions")
+        runtime = FakeRuntime(SkillRegistry(skills_dir))
+        monkeypatch.setattr(
+            "devmate.web_app.latest_trace_info",
+            lambda *args, **kwargs: SimpleNamespace(
+                run_url="https://smith.langchain.com/public/run",
+                shared_url="https://smith.langchain.com/public/share",
+            ),
+        )
+        app = create_app(settings, runtime=runtime, session_store=store)
+        client = TestClient(app)
+
+        session = client.post("/api/sessions", json={"title": "Trace Demo"}).json()
+        response = client.post(
+            "/api/chat",
+            json={"session_id": session["id"], "message": "trace this"},
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["trace"]["trace_url"] == "https://smith.langchain.com/public/run"
+    assert payload["trace"]["shared_trace_url"] == "https://smith.langchain.com/public/share"
+
+
 def test_file_endpoints_return_generated_content() -> None:
     root = _make_test_root()
     try:
@@ -222,3 +299,73 @@ def test_file_endpoints_return_generated_content() -> None:
     assert paths == ["index.html", "js/main.js"]
     assert content_response.status_code == 200
     assert "mountFlappyBird" in content_response.json()
+
+
+def test_settings_endpoints_round_trip_runtime_overrides() -> None:
+    root = _make_test_root()
+    try:
+        docs_dir = root / "docs"
+        skills_dir = root / ".skills"
+        docs_dir.mkdir()
+        skills_dir.mkdir()
+        config_path = root / "config.toml"
+        _write_config(config_path, docs_dir=docs_dir, skills_dir=skills_dir)
+        settings = load_settings(config_path)
+        store = SessionStore(root / ".sessions")
+        runtime = FakeRuntime(SkillRegistry(skills_dir))
+        app = create_app(settings, runtime=runtime, session_store=store)
+        client = TestClient(app)
+
+        get_response = client.get("/api/settings")
+        put_response = client.put(
+            "/api/settings",
+            json={
+                "model_name": "gpt-4.1-mini",
+                "ai_base_url": "https://api.openai.com/v1",
+                "api_key": "runtime-key",
+                "embedding_model_name": "text-embedding-v4",
+                "embedding_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "embedding_api_key": "embedding-key",
+                "search_limit": 7,
+                "share_public_traces": True,
+            },
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert get_response.status_code == 200
+    assert put_response.status_code == 200
+    assert put_response.json()["model_name"] == "gpt-4.1-mini"
+    assert put_response.json()["search_limit"] == 7
+
+
+def test_upload_endpoints_save_docs_and_skills() -> None:
+    root = _make_test_root()
+    try:
+        docs_dir = root / "docs"
+        skills_dir = root / ".skills"
+        docs_dir.mkdir()
+        skills_dir.mkdir()
+        config_path = root / "config.toml"
+        _write_config(config_path, docs_dir=docs_dir, skills_dir=skills_dir)
+        settings = load_settings(config_path)
+        store = SessionStore(root / ".sessions")
+        runtime = FakeRuntime(SkillRegistry(skills_dir))
+        app = create_app(settings, runtime=runtime, session_store=store)
+        client = TestClient(app)
+
+        docs_response = client.post(
+            "/api/uploads/docs",
+            files=[("files", ("guide.md", b"# Local Guide\n\nUse this doc.", "text/markdown"))],
+        )
+        skills_response = client.post(
+            "/api/uploads/skills",
+            files=[("files", ("poster-skill.md", b"# Poster Skill\n\nMake a poster page.\n\n1. Create the layout.", "text/markdown"))],
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert docs_response.status_code == 200
+    assert skills_response.status_code == 200
+    assert len(docs_response.json()["saved_files"]) == 1
+    assert len(skills_response.json()["saved_files"]) == 1

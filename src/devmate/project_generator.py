@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Generator
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -33,6 +34,18 @@ class GenerationResult:
     model_error: str | None = None
 
 
+@dataclass(frozen=True)
+class GenerationProgressEvent:
+    """One incremental generation event emitted during file creation."""
+
+    kind: str
+    path: str
+    existed_before: bool = False
+    used_model: bool = False
+    content_chunk: str | None = None
+    message: str | None = None
+
+
 class ProjectGenerator:
     """Generate a multi-file project from a prompt and plan."""
 
@@ -54,139 +67,193 @@ class ProjectGenerator:
         plan: AgentPlan,
         output_dir: Path,
         *,
+        on_progress: Callable[[GenerationProgressEvent], None] | None = None,
         on_file_written: Callable[[GeneratedFile], None] | None = None,
     ) -> GenerationResult:
         """Write the generated project files to disk."""
-        normalized_plan = self.normalize_plan(prompt, plan)
-        generated_files: list[GeneratedFile]
-        used_model = False
-        model_error: str | None = None
-        existing_files = self._load_existing_files(output_dir, normalized_plan)
-
-        if self._model_is_configured():
-            try:
-                generated_files = self._generate_with_model(prompt, normalized_plan, existing_files)
-                used_model = True
-            except Exception as exc:
-                model_error = str(exc)
-                generated_files = self._generate_with_templates(prompt, normalized_plan, existing_files)
-        else:
-            generated_files = self._generate_with_templates(prompt, normalized_plan, existing_files)
-
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for item in generated_files:
-            target = output_dir / item.path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(item.content.rstrip() + "\n", encoding="utf-8")
-            if on_file_written is not None:
-                on_file_written(item)
-
-        return GenerationResult(
-            output_dir=str(output_dir.resolve()),
-            files=generated_files,
-            used_model=used_model,
-            model_error=model_error,
+        stream = self.generate_project_stream(
+            prompt,
+            plan,
+            output_dir,
+            on_file_written=on_file_written,
         )
+        while True:
+            try:
+                event = next(stream)
+            except StopIteration as stop:
+                return stop.value
+            if on_progress is not None:
+                on_progress(event)
 
-    def _generate_with_model(
+    @traceable(run_type="chain", name="generate_project_files_stream")
+    def generate_project_stream(
         self,
         prompt: str,
         plan: AgentPlan,
-        existing_files: dict[str, str],
-    ) -> list[GeneratedFile]:
-        response = self._get_model().invoke(
+        output_dir: Path,
+        *,
+        on_file_written: Callable[[GeneratedFile], None] | None = None,
+    ) -> Generator[GenerationProgressEvent, None, GenerationResult]:
+        """Yield generation progress while writing project files to disk."""
+        normalized_plan = self.normalize_plan(prompt, plan)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        existing_files = self._load_existing_files(output_dir, normalized_plan)
+        generated_files: list[GeneratedFile] = []
+        model_generated_count = 0
+        model_errors: list[str] = []
+
+        for path in normalized_plan.planned_files:
+            existed_before = path in existing_files
+            can_use_model = self._model_is_configured()
+            yield GenerationProgressEvent(
+                kind="started",
+                path=path,
+                existed_before=existed_before,
+                used_model=can_use_model,
+            )
+
+            if can_use_model:
+                try:
+                    generated = yield from self._generate_single_file_with_model(
+                        prompt,
+                        normalized_plan,
+                        path,
+                        existing_files.get(path),
+                        existed_before=existed_before,
+                    )
+                    model_generated_count += 1
+                except Exception as exc:
+                    model_errors.append(f"{path}: {exc}")
+                    yield GenerationProgressEvent(
+                        kind="fallback",
+                        path=path,
+                        existed_before=existed_before,
+                        used_model=False,
+                        message=str(exc),
+                    )
+                    generated = GeneratedFile(
+                        path=path,
+                        content=self._template_for_path(
+                            path,
+                            prompt,
+                            normalized_plan,
+                            existing_files.get(path),
+                        ),
+                        existed_before=existed_before,
+                    )
+            else:
+                yield GenerationProgressEvent(
+                    kind="fallback",
+                    path=path,
+                    existed_before=existed_before,
+                    used_model=False,
+                    message="Planning model is not configured for file generation.",
+                )
+                generated = GeneratedFile(
+                    path=path,
+                    content=self._template_for_path(
+                        path,
+                        prompt,
+                        normalized_plan,
+                        existing_files.get(path),
+                    ),
+                    existed_before=existed_before,
+                )
+
+            target = output_dir / generated.path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(generated.content.rstrip() + "\n", encoding="utf-8")
+            generated_files.append(generated)
+            if on_file_written is not None:
+                on_file_written(generated)
+            yield GenerationProgressEvent(
+                kind="completed",
+                path=generated.path,
+                existed_before=generated.existed_before,
+                used_model=generated.path not in {item.split(":")[0] for item in model_errors},
+            )
+
+        model_error = "; ".join(model_errors) if model_errors else None
+        return GenerationResult(
+            output_dir=str(output_dir.resolve()),
+            files=generated_files,
+            used_model=model_generated_count > 0,
+            model_error=model_error,
+        )
+
+    def _generate_single_file_with_model(
+        self,
+        prompt: str,
+        plan: AgentPlan,
+        path: str,
+        existing_content: str | None,
+        *,
+        existed_before: bool,
+    ) -> Generator[GenerationProgressEvent, None, GeneratedFile]:
+        chunks: list[str] = []
+        for chunk in self._iter_model_text(
             [
                 {
                     "role": "system",
                     "content": (
-                        "You generate small, runnable multi-file starter projects. "
-                        "Return JSON only with this schema: "
-                        "{\"files\": [{\"path\": \"...\", \"content\": \"...\"}]}. "
-                        "Every file path must be repo-relative and match the requested plan. "
-                        "Prefer concise but complete starter code. "
-                        "If an existing file is provided, update it in place instead of rewriting the project from scratch. "
-                        "When the request is for a browser game or static website, include HTML, CSS, and JavaScript files."
+                        "You generate exactly one file for a runnable starter project. "
+                        "Return only the raw file content for the requested file path. "
+                        "Do not wrap the response in markdown fences. "
+                        "Keep imports, script tags, stylesheet references, and DOM hooks aligned with the planned file paths. "
+                        "If the target file already exists, update it in place while preserving intent."
                     ),
                 },
                 {
                     "role": "user",
-                    "content": self._build_generation_prompt(prompt, plan, existing_files),
+                    "content": self._build_single_file_prompt(
+                        prompt,
+                        plan,
+                        path,
+                        existing_content,
+                    ),
                 },
             ]
-        )
-        payload = json.loads(self._extract_json_blob(self._message_text(response.content)))
-        raw_files = payload.get("files", [])
-        if not isinstance(raw_files, list) or not raw_files:
-            raise ValueError("Generation response did not include files.")
-
-        allowed_paths = set(plan.planned_files)
-        generated: list[GeneratedFile] = []
-        for item in raw_files:
-            if not isinstance(item, dict):
+        ):
+            if not chunk:
                 continue
-            path = str(item.get("path", "")).strip()
-            content = str(item.get("content", "")).rstrip()
-            if not path or not content:
-                continue
-            if allowed_paths and path not in allowed_paths:
-                continue
-            generated.append(
-                GeneratedFile(
-                    path=path,
-                    content=content,
-                    existed_before=path in existing_files,
-                )
-            )
-
-        if not generated:
-            raise ValueError("Generation response did not contain usable files.")
-
-        missing_paths = [path for path in plan.planned_files if path not in {item.path for item in generated}]
-        if missing_paths:
-            generated.extend(
-                GeneratedFile(
-                    path=path,
-                    content=self._template_for_path(path, prompt, plan, existing_files.get(path)),
-                    existed_before=path in existing_files,
-                )
-                for path in missing_paths
-            )
-        return generated
-
-    def _generate_with_templates(
-        self,
-        prompt: str,
-        plan: AgentPlan,
-        existing_files: dict[str, str],
-    ) -> list[GeneratedFile]:
-        return [
-            GeneratedFile(
+            chunks.append(chunk)
+            yield GenerationProgressEvent(
+                kind="chunk",
                 path=path,
-                content=self._template_for_path(path, prompt, plan, existing_files.get(path)),
-                existed_before=path in existing_files,
+                existed_before=existed_before,
+                used_model=True,
+                content_chunk=chunk,
             )
-            for path in plan.planned_files
-        ]
+
+        content = self._sanitize_generated_file_content(
+            path,
+            plan.planned_files,
+            "".join(chunks).strip(),
+        )
+        if not content:
+            raise ValueError("Model returned empty file content.")
+        return GeneratedFile(
+            path=path,
+            content=content,
+            existed_before=existed_before,
+        )
 
     @staticmethod
-    def _build_generation_prompt(
+    def _build_single_file_prompt(
         prompt: str,
         plan: AgentPlan,
-        existing_files: dict[str, str],
+        path: str,
+        existing_content: str | None,
     ) -> str:
-        existing_block = "None"
-        if existing_files:
-            existing_block = "\n\n".join(
-                f"[FILE: {path}]\n{content}"
-                for path, content in existing_files.items()
-            )
+        existing_block = existing_content or "None"
         return (
             f"User request:\n{prompt}\n\n"
             f"Plan summary:\n{plan.summary}\n\n"
+            f"Target file:\n{path}\n\n"
             f"Planned files:\n- " + "\n- ".join(plan.planned_files) + "\n\n"
             f"Implementation steps:\n- " + "\n- ".join(plan.implementation_steps) + "\n\n"
             f"Existing file contents:\n{existing_block}\n\n"
-            "Generate the file contents now."
+            "Generate the file content now."
         )
 
     def _get_model(self) -> ChatOpenAI:
@@ -195,11 +262,24 @@ class ProjectGenerator:
                 model=self.settings.model.model_name,
                 api_key=self.settings.model.api_key,
                 base_url=self.settings.model.ai_base_url,
-                timeout=60.0,
+                timeout=45.0,
                 max_retries=1,
                 temperature=0.2,
             )
         return self._model
+
+    def _iter_model_text(self, messages: list[dict[str, str]]) -> Generator[str, None, None]:
+        model = self._get_model()
+        if hasattr(model, "stream"):
+            for chunk in model.stream(messages):
+                text = self._message_text(getattr(chunk, "content", ""))
+                if text:
+                    yield text
+            return
+        response = model.invoke(messages)
+        text = self._message_text(response.content)
+        if text:
+            yield text
 
     def _model_is_configured(self) -> bool:
         key = self.settings.model.api_key.strip()
@@ -239,6 +319,206 @@ class ProjectGenerator:
         return stripped[start : end + 1]
 
     @staticmethod
+    def _strip_code_fences(text: str) -> str:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            if len(lines) >= 3 and lines[-1].strip() == "```":
+                stripped = "\n".join(lines[1:-1]).strip()
+                if "\n" in stripped:
+                    first_line, remainder = stripped.split("\n", 1)
+                    if first_line.strip() in {
+                        "html",
+                        "css",
+                        "javascript",
+                        "js",
+                        "json",
+                        "markdown",
+                        "md",
+                    }:
+                        stripped = remainder.strip()
+        return stripped
+
+    @classmethod
+    def _sanitize_generated_file_content(
+        cls,
+        path: str,
+        planned_files: list[str],
+        text: str,
+    ) -> str:
+        cleaned = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
+        cleaned = cls._extract_target_file_block(path, planned_files, cleaned)
+        cleaned = cls._strip_code_fences(cleaned)
+        cleaned = cls._drop_leading_file_label(path, cleaned)
+        cleaned = cls._trim_to_file_body(path, cleaned)
+        cleaned = cls._remove_embedded_other_files(path, planned_files, cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _extract_target_file_block(path: str, planned_files: list[str], text: str) -> str:
+        lines = text.splitlines()
+        if not lines:
+            return text
+
+        def labels_for(file_path: str) -> set[str]:
+            normalized = file_path.replace("\\", "/").strip()
+            base = Path(normalized).name
+            return {
+                normalized,
+                base,
+                f"`{normalized}`",
+                f"`{base}`",
+            }
+
+        target_labels = labels_for(path)
+        all_labels: dict[str, set[str]] = {
+            item.replace("\\", "/").strip(): labels_for(item)
+            for item in planned_files
+        }
+        start_index: int | None = None
+        for index, line in enumerate(lines):
+            if line.strip() in target_labels:
+                start_index = index + 1
+                break
+        if start_index is None:
+            return text
+
+        end_index = len(lines)
+        for index in range(start_index, len(lines)):
+            current = lines[index].strip()
+            for candidate_path, candidate_labels in all_labels.items():
+                if candidate_path == path.replace("\\", "/").strip():
+                    continue
+                if current in candidate_labels:
+                    end_index = index
+                    break
+            if end_index != len(lines):
+                break
+        return "\n".join(lines[start_index:end_index]).strip()
+
+    @staticmethod
+    def _drop_leading_file_label(path: str, text: str) -> str:
+        normalized = path.replace("\\", "/").strip()
+        base = Path(normalized).name
+        labels = {
+            normalized,
+            base,
+            f"`{normalized}`",
+            f"`{base}`",
+        }
+        lines = text.splitlines()
+        while lines and lines[0].strip() in labels:
+            lines.pop(0)
+        return "\n".join(lines).strip()
+
+    @classmethod
+    def _trim_to_file_body(cls, path: str, text: str) -> str:
+        normalized = path.replace("\\", "/").lower()
+        if normalized.endswith(".html"):
+            return cls._trim_html(text)
+        if normalized.endswith(".css"):
+            return cls._trim_css(text)
+        if normalized.endswith(".js"):
+            return cls._trim_javascript(text)
+        if normalized.endswith(".md"):
+            return cls._trim_markdown(text)
+        return text
+
+    @staticmethod
+    def _trim_html(text: str) -> str:
+        lower = text.lower()
+        start = lower.find("<!doctype html")
+        if start == -1:
+            start = lower.find("<html")
+        if start == -1:
+            return text
+        end = lower.rfind("</html>")
+        if end == -1:
+            return text[start:].strip()
+        return text[start : end + len("</html>")].strip()
+
+    @staticmethod
+    def _trim_css(text: str) -> str:
+        lines = text.splitlines()
+        content_start: int | None = None
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(("@import", ":root", "/*")):
+                content_start = index
+                break
+            if re.match(r"^(\*|html|body|main|section|header|footer|nav|button|a|img|svg|\.|#|\[).*(\{|,)$", stripped):
+                content_start = index
+                break
+        if content_start is None:
+            return text
+        return "\n".join(lines[content_start:]).strip()
+
+    @staticmethod
+    def _trim_javascript(text: str) -> str:
+        lines = text.splitlines()
+        content_start: int | None = None
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(("import ", "export ", "const ", "let ", "var ", "function ", "class ", "//", "/*", "document.", "window.", "(()")):
+                content_start = index
+                break
+        if content_start is None:
+            return text
+        return "\n".join(lines[content_start:]).strip()
+
+    @staticmethod
+    def _trim_markdown(text: str) -> str:
+        lines = text.splitlines()
+        content_start: int | None = None
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(("#", "-", "1.", "2.", "3.")):
+                content_start = index
+                break
+            if not re.match(r"^[A-Za-z0-9_/.-]+\.(html|css|js|md)$", stripped, flags=re.IGNORECASE):
+                content_start = index
+                break
+        if content_start is None:
+            return text
+        return "\n".join(lines[content_start:]).strip()
+
+    @staticmethod
+    def _remove_embedded_other_files(path: str, planned_files: list[str], text: str) -> str:
+        normalized = path.replace("\\", "/").lower()
+        if not normalized.endswith(".md"):
+            return text
+        current_labels = {
+            path.replace("\\", "/").lower(),
+            Path(path).name.lower(),
+        }
+        other_labels = {
+            label
+            for item in planned_files
+            for label in {item.replace("\\", "/").lower(), Path(item).name.lower()}
+            if label not in current_labels
+        }
+        lines = text.splitlines()
+        cutoff = len(lines)
+        for index, line in enumerate(lines):
+            lowered = line.strip().lower().strip("`")
+            if not lowered:
+                continue
+            if any(
+                re.search(rf"(^|[^a-z0-9_/.-]){re.escape(label)}($|[^a-z0-9_/.-])", lowered)
+                for label in other_labels
+            ):
+                cutoff = index
+                break
+        return "\n".join(lines[:cutoff]).strip()
+
+    @staticmethod
     def _load_existing_files(output_dir: Path, plan: AgentPlan) -> dict[str, str]:
         existing: dict[str, str] = {}
         for relative_path in plan.planned_files:
@@ -251,7 +531,48 @@ class ProjectGenerator:
     def _infer_mode(cls, prompt: str, planned_files: list[str]) -> str:
         lowered = prompt.lower()
         joined_files = " ".join(path.lower() for path in planned_files)
-        if any(token in lowered for token in {"flappy", "game", "arcade", "canvas", "bird"}):
+        if any(
+            token in lowered
+            for token in {
+                "static",
+                "static page",
+                "landing page",
+                "showcase",
+                "hero section",
+                "illustration",
+                "poster",
+                "portrait",
+                "anime girl",
+                "pretty girl",
+                "beautiful girl",
+                "ui mock",
+                "静态",
+                "界面",
+                "页面",
+                "插画",
+                "海报",
+                "立绘",
+                "美少女",
+                "少女",
+            }
+        ):
+            return "static_site"
+        if any(
+            token in lowered
+            for token in {
+                "flappy",
+                "browser game",
+                "web game",
+                "arcade game",
+                "canvas game",
+                "platformer",
+                "runner game",
+                "小游戏",
+                "网页游戏",
+                "浏览器游戏",
+                "街机游戏",
+            }
+        ):
             return "browser_game"
         if any(token in lowered for token in {"map", "trail", "hiking", "leaflet", "mapbox"}):
             return "map_site"
@@ -299,7 +620,7 @@ class ProjectGenerator:
         if mode == "browser_game":
             defaults = [
                 "Build the game shell with a scoreboard, status text, and a canvas scene.",
-                "Implement the Flappy Bird gameplay loop, gravity, pipe spawning, and collision detection in JavaScript.",
+                "Implement the core gameplay loop, player controls, obstacle or goal logic, and collision handling in JavaScript.",
                 "Wire user input, restart behavior, and render updates so the game is playable immediately in the browser.",
                 "Add styling and a short README explaining how to run the game locally.",
             ]
@@ -346,7 +667,7 @@ class ProjectGenerator:
                 return game_template
 
         if mode == "static_site" and mode != "map_site":
-            static_template = ProjectGenerator._static_site_template(normalized, prompt)
+            static_template = ProjectGenerator._static_site_template(normalized, prompt, plan)
             if static_template is not None:
                 return static_template
 
@@ -579,6 +900,7 @@ class ProjectGenerator:
 
     @staticmethod
     def _browser_game_template(normalized: str, prompt: str) -> str | None:
+        is_flappy = "flappy" in prompt.lower()
         if normalized.endswith("index.html"):
             return (
                 "<!DOCTYPE html>\n"
@@ -586,14 +908,14 @@ class ProjectGenerator:
                 "<head>\n"
                 "  <meta charset=\"UTF-8\" />\n"
                 "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n"
-                "  <title>Flappy Bird Clone</title>\n"
+                f"  <title>{'Flappy Bird Clone' if is_flappy else 'Browser Game Demo'}</title>\n"
                 "  <link rel=\"stylesheet\" href=\"styles.css\" />\n"
                 "</head>\n"
                 "<body>\n"
                 "  <main class=\"game-shell\">\n"
                 "    <section class=\"hero\">\n"
                 "      <p class=\"eyebrow\">DevMate Browser Game</p>\n"
-                "      <h1>Flappy Bird Clone</h1>\n"
+                f"      <h1>{'Flappy Bird Clone' if is_flappy else 'Browser Game Demo'}</h1>\n"
                 f"      <p class=\"lede\">Generated from prompt: {prompt}</p>\n"
                 "    </section>\n"
                 "    <section class=\"game-layout\">\n"
@@ -602,8 +924,8 @@ class ProjectGenerator:
                 "        <div><span>Best</span><strong id=\"best-score\">0</strong></div>\n"
                 "        <button id=\"start-button\" type=\"button\">Start / Restart</button>\n"
                 "      </div>\n"
-                "      <canvas id=\"game-canvas\" width=\"420\" height=\"640\" aria-label=\"Flappy Bird game canvas\"></canvas>\n"
-                "      <p id=\"status\" class=\"status\">Press Start or hit Space to flap.</p>\n"
+                f"      <canvas id=\"game-canvas\" width=\"420\" height=\"640\" aria-label=\"{'Flappy Bird game canvas' if is_flappy else 'Browser game canvas'}\"></canvas>\n"
+                f"      <p id=\"status\" class=\"status\">{'Press Start or hit Space to flap.' if is_flappy else 'Press Start to begin playing.'}</p>\n"
                 "    </section>\n"
                 "  </main>\n"
                 "  <script type=\"module\" src=\"js/main.js\"></script>\n"
@@ -638,7 +960,7 @@ class ProjectGenerator:
             )
         if normalized.endswith("js/main.js"):
             return (
-                "import { mountFlappyBird } from './game.js';\n\n"
+                f"import {{ {'mountFlappyBird' if is_flappy else 'mountBrowserGame'} }} from './game.js';\n\n"
                 "const canvas = document.getElementById('game-canvas');\n"
                 "const score = document.getElementById('score');\n"
                 "const bestScore = document.getElementById('best-score');\n"
@@ -647,9 +969,117 @@ class ProjectGenerator:
                 "if (!(canvas instanceof HTMLCanvasElement) || !score || !bestScore || !status || !(startButton instanceof HTMLButtonElement)) {\n"
                 "  throw new Error('Game UI failed to initialize.');\n"
                 "}\n\n"
-                "mountFlappyBird({ canvas, scoreEl: score, bestEl: bestScore, statusEl: status, startButton });\n"
+                f"{'mountFlappyBird' if is_flappy else 'mountBrowserGame'}({{ canvas, scoreEl: score, bestEl: bestScore, statusEl: status, startButton }});\n"
             )
         if normalized.endswith("js/game.js"):
+            if not is_flappy:
+                return (
+                    "function randomBetween(min, max) {\n"
+                    "  return Math.random() * (max - min) + min;\n"
+                    "}\n\n"
+                    "export function mountBrowserGame({ canvas, scoreEl, bestEl, statusEl, startButton }) {\n"
+                    "  const ctx = canvas.getContext('2d');\n"
+                    "  if (!ctx) throw new Error('Canvas 2D context unavailable.');\n"
+                    "  const player = { x: 72, y: canvas.height / 2, size: 24, velocityY: 0 };\n"
+                    "  let stars = [];\n"
+                    "  let running = false;\n"
+                    "  let score = 0;\n"
+                    "  let best = Number(localStorage.getItem('devmate-browser-game-best') || '0');\n"
+                    "  let animationFrame = 0;\n"
+                    "  let lastTime = 0;\n"
+                    "  let spawnTimer = 0;\n\n"
+                    "  function reset() {\n"
+                    "    player.y = canvas.height / 2;\n"
+                    "    player.velocityY = 0;\n"
+                    "    stars = [];\n"
+                    "    score = 0;\n"
+                    "    spawnTimer = 0;\n"
+                    "    scoreEl.textContent = '0';\n"
+                    "    bestEl.textContent = String(best);\n"
+                    "    statusEl.textContent = 'Collect glowing stars and avoid falling off the stage.';\n"
+                    "  }\n\n"
+                    "  function spawnStar() {\n"
+                    "    stars.push({ x: canvas.width + 30, y: randomBetween(60, canvas.height - 80), size: randomBetween(12, 18), claimed: false });\n"
+                    "  }\n\n"
+                    "  function jump() {\n"
+                    "    if (!running) {\n"
+                    "      start();\n"
+                    "      return;\n"
+                    "    }\n"
+                    "    player.velocityY = -320;\n"
+                    "  }\n\n"
+                    "  function update(delta) {\n"
+                    "    player.velocityY += 900 * delta;\n"
+                    "    player.y += player.velocityY * delta;\n"
+                    "    spawnTimer += delta;\n"
+                    "    if (spawnTimer >= 1.1) { spawnTimer = 0; spawnStar(); }\n"
+                    "    stars = stars.map((star) => ({ ...star, x: star.x - 180 * delta })).filter((star) => star.x > -40);\n"
+                    "    for (const star of stars) {\n"
+                    "      if (!star.claimed && Math.abs(star.x - player.x) < star.size + player.size / 2 && Math.abs(star.y - player.y) < star.size + player.size / 2) {\n"
+                    "        star.claimed = true;\n"
+                    "        score += 1;\n"
+                    "        scoreEl.textContent = String(score);\n"
+                    "      }\n"
+                    "    }\n"
+                    "    if (player.y < 0 || player.y > canvas.height) {\n"
+                    "      gameOver();\n"
+                    "    }\n"
+                    "  }\n\n"
+                    "  function draw() {\n"
+                    "    const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);\n"
+                    "    gradient.addColorStop(0, '#111827');\n"
+                    "    gradient.addColorStop(1, '#312e81');\n"
+                    "    ctx.fillStyle = gradient;\n"
+                    "    ctx.fillRect(0, 0, canvas.width, canvas.height);\n"
+                    "    stars.forEach((star) => {\n"
+                    "      if (star.claimed) return;\n"
+                    "      ctx.fillStyle = '#facc15';\n"
+                    "      ctx.beginPath();\n"
+                    "      ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);\n"
+                    "      ctx.fill();\n"
+                    "    });\n"
+                    "    ctx.fillStyle = '#f9a8d4';\n"
+                    "    ctx.beginPath();\n"
+                    "    ctx.roundRect(player.x - 20, player.y - 28, 40, 56, 18);\n"
+                    "    ctx.fill();\n"
+                    "    ctx.fillStyle = '#ffffff';\n"
+                    "    ctx.beginPath();\n"
+                    "    ctx.arc(player.x + 8, player.y - 8, 4, 0, Math.PI * 2);\n"
+                    "    ctx.fill();\n"
+                    "  }\n\n"
+                    "  function frame(time) {\n"
+                    "    if (!running) return;\n"
+                    "    if (!lastTime) lastTime = time;\n"
+                    "    const delta = Math.min((time - lastTime) / 1000, 0.032);\n"
+                    "    lastTime = time;\n"
+                    "    update(delta);\n"
+                    "    draw();\n"
+                    "    animationFrame = window.requestAnimationFrame(frame);\n"
+                    "  }\n\n"
+                    "  function start() {\n"
+                    "    window.cancelAnimationFrame(animationFrame);\n"
+                    "    lastTime = 0;\n"
+                    "    running = true;\n"
+                    "    reset();\n"
+                    "    animationFrame = window.requestAnimationFrame(frame);\n"
+                    "  }\n\n"
+                    "  function gameOver() {\n"
+                    "    if (!running) return;\n"
+                    "    running = false;\n"
+                    "    window.cancelAnimationFrame(animationFrame);\n"
+                    "    best = Math.max(best, score);\n"
+                    "    localStorage.setItem('devmate-browser-game-best', String(best));\n"
+                    "    bestEl.textContent = String(best);\n"
+                    "    statusEl.textContent = `Game over. You collected ${score} stars.`;\n"
+                    "    draw();\n"
+                    "  }\n\n"
+                    "  startButton.addEventListener('click', start);\n"
+                    "  window.addEventListener('keydown', (event) => { if (event.code === 'Space') { event.preventDefault(); jump(); } });\n"
+                    "  canvas.addEventListener('pointerdown', jump);\n"
+                    "  bestEl.textContent = String(best);\n"
+                    "  draw();\n"
+                    "}\n"
+                )
             return (
                 "const PIPE_WIDTH = 72;\n"
                 "const PIPE_GAP = 160;\n"
@@ -688,6 +1118,15 @@ class ProjectGenerator:
                 "}\n"
             )
         if normalized.endswith("readme.md"):
+            if not is_flappy:
+                return (
+                    "# Browser Game Demo\n\n"
+                    "A small browser game scaffold generated by DevMate.\n\n"
+                    "## Run\n\n"
+                    "1. Open `index.html` in a browser, or serve the folder with a static file server.\n"
+                    "2. Click **Start / Restart** or press the space bar to begin.\n"
+                    "3. Collect the glowing stars and try to beat your best score.\n"
+                )
             return (
                 "# Flappy Bird Web Game\n\n"
                 "A small browser game scaffold generated by DevMate.\n\n"
@@ -699,7 +1138,9 @@ class ProjectGenerator:
         return None
 
     @staticmethod
-    def _static_site_template(normalized: str, prompt: str) -> str | None:
+    def _static_site_template(normalized: str, prompt: str, plan: AgentPlan) -> str | None:
+        css_path = next((item for item in plan.planned_files if item.lower().endswith(".css")), "styles.css")
+        js_path = next((item for item in plan.planned_files if item.lower().endswith(".js")), "js/app.js")
         if normalized.endswith("index.html"):
             return (
                 "<!DOCTYPE html>\n"
@@ -708,7 +1149,7 @@ class ProjectGenerator:
                 "  <meta charset=\"UTF-8\" />\n"
                 "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n"
                 "  <title>DevMate Site</title>\n"
-                "  <link rel=\"stylesheet\" href=\"styles.css\" />\n"
+                f"  <link rel=\"stylesheet\" href=\"{css_path}\" />\n"
                 "</head>\n"
                 "<body>\n"
                 "  <main class=\"shell\">\n"
@@ -720,7 +1161,7 @@ class ProjectGenerator:
                 "    </section>\n"
                 "    <section class=\"grid\" id=\"feature-grid\"></section>\n"
                 "  </main>\n"
-                "  <script type=\"module\" src=\"js/app.js\"></script>\n"
+                f"  <script type=\"module\" src=\"{js_path}\"></script>\n"
                 "</body>\n"
                 "</html>"
             )

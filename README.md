@@ -22,7 +22,7 @@ Press `Ctrl+C` once in that terminal to stop all three services together.
 
 DevMate now includes a containerized stack for:
 
-- `devmate-mcp` on `http://localhost:8001`
+- `devmate-mcp` on the internal Docker network
 - `devmate-web` on `http://localhost:8765`
 - `devmate-frontend` on `http://localhost:5173`
 
@@ -50,6 +50,7 @@ Container notes:
 - The backend services read [config.docker.toml](/D:/DevMate/config.docker.toml).
 - `/api` and `/api/chat/stream` are proxied through the frontend container by [frontend/nginx.conf](/D:/DevMate/frontend/nginx.conf).
 - Persistent app data lives in Docker volumes for `.skills`, `.sessions`, `generated-output`, and `.chroma`.
+- `devmate-mcp` no longer publishes `8001` to the host by default. The web service reaches it through Docker service discovery at `http://devmate-mcp:8001`.
 
 ## Demo Runbook
 
@@ -100,9 +101,11 @@ Expected output highlights:
 - `Local knowledge sources: ...`
 - `Matched skills: ...`
 - `LangSmith trace URL: ...`
+- `LangSmith shared trace URL: ...`
 - `Generated output dir: generated-output`
 
 `generated-output/` is ignored by Git and can be recreated for each demo run.
+`share_public_traces` is enabled by default in [config.toml](/D:/DevMate/config.toml) and [config.docker.toml](/D:/DevMate/config.docker.toml), so successful runs should produce a shareable LangSmith link automatically when LangSmith is configured.
 
 ## Session Memory And Web UI
 

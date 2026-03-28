@@ -1,11 +1,13 @@
-﻿import {
+import {
   type ChatResponse,
   type FileNode,
   type Message,
+  type RuntimeSettings,
   type SearchResult,
   type Session,
   type SessionDetail,
   type Skill,
+  type UploadResponse,
 } from "@/types";
 import { generateId } from "@/lib/utils";
 
@@ -60,6 +62,32 @@ class ApiClient {
 
   public async deleteSession(sessionId: string): Promise<void> {
     await this.request(`/api/sessions/${sessionId}`, { method: "DELETE" });
+  }
+
+  public async getSettings(): Promise<RuntimeSettings> {
+    return await this.request<RuntimeSettings>("/api/settings");
+  }
+
+  public async updateSettings(payload: Omit<RuntimeSettings, "available_models">): Promise<RuntimeSettings> {
+    return await this.request<RuntimeSettings>("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async uploadDocs(files: File[]): Promise<UploadResponse> {
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file));
+    return await this.multipartRequest<UploadResponse>("/api/uploads/docs", form);
+  }
+
+  public async uploadSkills(files: File[], name?: string): Promise<UploadResponse> {
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file));
+    if (name?.trim()) {
+      form.append("name", name.trim());
+    }
+    return await this.multipartRequest<UploadResponse>("/api/uploads/skills", form);
   }
 
   public async postChat(sessionId: string, message: string): Promise<ChatResponse> {
@@ -157,6 +185,26 @@ class ApiClient {
 
     throw new ApiError("Unexpected request failure.", 500);
   }
+
+  private async multipartRequest<T>(path: string, body: FormData, retries = 3): Promise<T> {
+    const url = `${this.baseUrl}${path}`;
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        const response = await fetch(url, { method: "POST", body });
+        if (!response.ok) {
+          const message = await extractErrorMessage(response);
+          throw new ApiError(message, response.status);
+        }
+        return (await response.json()) as T;
+      } catch (error) {
+        if (attempt === retries) {
+          throw error;
+        }
+        await sleep(2 ** attempt * 250);
+      }
+    }
+    throw new ApiError("Unexpected upload failure.", 500);
+  }
 }
 
 async function extractErrorMessage(response: Response): Promise<string> {
@@ -240,6 +288,7 @@ function normalizeSessionDetail(raw: unknown): SessionDetail {
             planning_steps: normalizeLegacySteps(turn),
             search_results: normalizeLegacySearchResults(turn),
             generated_files: normalizeLegacyGeneratedFiles(turn),
+            trace: normalizeTrace(turn),
           },
         },
       ];
@@ -307,6 +356,7 @@ function normalizeLegacyChatResponse(
         planning_steps: normalizeLegacySteps(record),
         search_results: normalizeLegacySearchResults(record),
         generated_files: normalizeLegacyGeneratedFiles(record),
+        trace: normalizeTrace(record),
       },
     },
   };
@@ -376,11 +426,25 @@ function normalizeMetadata(raw: unknown): Message["metadata"] | undefined {
   const generatedFiles = Array.isArray(raw.generated_files)
     ? raw.generated_files.map(normalizeFileNode)
     : undefined;
+  const trace = normalizeTrace(raw);
 
   return {
     planning_steps: planningSteps,
     search_results: searchResults,
     generated_files: generatedFiles,
+    trace,
+  };
+}
+
+function normalizeTrace(record: Record<string, unknown>): NonNullable<Message["metadata"]>["trace"] | undefined {
+  const traceUrl = readString(record.trace_url);
+  const sharedTraceUrl = readString(record.shared_trace_url);
+  if (!traceUrl && !sharedTraceUrl) {
+    return undefined;
+  }
+  return {
+    trace_url: traceUrl,
+    shared_trace_url: sharedTraceUrl,
   };
 }
 
@@ -508,4 +572,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export const apiClient = new ApiClient();
+
+
 

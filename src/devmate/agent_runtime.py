@@ -13,7 +13,12 @@ from langsmith.run_helpers import traceable
 from devmate.config_loader import AppSettings
 from devmate.mcp_client import SearchMcpClient, SearchResult
 from devmate.planning_agent import AgentPlan, PlanningAgent
-from devmate.project_generator import GenerationResult, ProjectGenerator, GeneratedFile
+from devmate.project_generator import (
+    GenerationProgressEvent,
+    GenerationResult,
+    ProjectGenerator,
+    GeneratedFile,
+)
 from devmate.rag_pipeline import KnowledgeBasePipeline, KnowledgeSnippet
 from devmate.search_policy import should_search_web
 from devmate.session_store import SessionStore, SessionTurn
@@ -285,17 +290,23 @@ class DevMateRuntime:
                     "Writing the planned files into the output directory.",
                     "running",
                 )
-                generation = self.project_generator.generate_project(
+                generation_stream = self.project_generator.generate_project_stream(
                     prompt,
                     plan,
                     output_dir=generate_output_dir,
-                    on_file_written=lambda item: None,
                 )
-                for file_item in generation.files:
-                    yield {
-                        "type": "file",
-                        "file": self._generated_file_node(file_item),
-                    }
+                file_chunk_counts: dict[str, int] = {}
+                while True:
+                    try:
+                        generation_event = next(generation_stream)
+                    except StopIteration as stop:
+                        generation = stop.value
+                        break
+                    yield from self._generation_progress_events(
+                        generation_event,
+                        file_chunk_counts,
+                        emit_step,
+                    )
                 yield emit_step(
                     "generation",
                     "Generate project files",
@@ -471,6 +482,61 @@ class DevMateRuntime:
             "type": "file",
             "status": "modified" if item.existed_before else "new",
         }
+
+    @staticmethod
+    def _generation_progress_events(
+        event: GenerationProgressEvent,
+        file_chunk_counts: dict[str, int],
+        emit_step,
+    ) -> Iterator[dict[str, object]]:
+        step_id = f"generation-{re.sub(r'[^a-zA-Z0-9]+', '-', event.path).strip('-') or 'file'}"
+        title = f"Generate {event.path}"
+        description = "Streaming file content from the model and writing it to disk."
+
+        if event.kind == "started":
+            yield emit_step(step_id, title, description, "running")
+            return
+
+        if event.kind == "chunk":
+            count = file_chunk_counts.get(event.path, 0) + len(event.content_chunk or "")
+            file_chunk_counts[event.path] = count
+            if count == len(event.content_chunk or "") or count % 400 < len(event.content_chunk or ""):
+                yield emit_step(
+                    step_id,
+                    title,
+                    description,
+                    "running",
+                    output=f"Streaming content... {count} chars received",
+                )
+            return
+
+        if event.kind == "fallback":
+            yield emit_step(
+                step_id,
+                title,
+                description,
+                "failed",
+                output=event.message or "Falling back to template generation.",
+            )
+            return
+
+        if event.kind == "completed":
+            yield {
+                "type": "file",
+                "file": {
+                    "name": Path(event.path).name,
+                    "path": event.path,
+                    "type": "file",
+                    "status": "modified" if event.existed_before else "new",
+                },
+            }
+            yield emit_step(
+                step_id,
+                title,
+                description,
+                "completed",
+                output="File written successfully.",
+            )
 
     @staticmethod
     def _render_assistant_message(result: PromptResult) -> str:

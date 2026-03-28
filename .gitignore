@@ -35,5 +35,6 @@ test_scratch/
 .chroma/
 .sessions/
 generated-output/
+.runtime/
 
 node_modules/
