@@ -90,11 +90,15 @@ class ApiClient {
     return await this.multipartRequest<UploadResponse>("/api/uploads/skills", form);
   }
 
-  public async postChat(sessionId: string, message: string): Promise<ChatResponse> {
+  public async postChat(
+    sessionId: string,
+    message: string,
+    runtimeMode: "classic" | "deepagents" = "classic",
+  ): Promise<ChatResponse> {
     try {
       const raw = await this.request<unknown>("/api/chat", {
         method: "POST",
-        body: JSON.stringify({ session_id: sessionId, message }),
+        body: JSON.stringify({ session_id: sessionId, message, runtime_mode: runtimeMode }),
       });
       return normalizeChatResponse(raw, sessionId);
     } catch (error) {
@@ -106,6 +110,7 @@ class ApiClient {
         body: JSON.stringify({
           session_id: sessionId,
           prompt: message,
+          runtime_mode: runtimeMode,
           generate: true,
           output_dir: "generated-output",
         }),
@@ -376,13 +381,13 @@ function normalizeLegacySteps(record: Record<string, unknown>): import("@/types"
 
 function normalizeLegacySearchResults(record: Record<string, unknown>): SearchResult[] {
   const sources = Array.isArray(record.web_results) ? record.web_results : [];
-  return sources.map((item, index) => {
+  const webResults: SearchResult[] = sources.map((item, index) => {
     if (!isRecord(item)) {
       return {
         id: `result-${index}`,
         title: `Result ${index + 1}`,
         content: "",
-        source: "web",
+        source: "web" as const,
         score: 0.5,
       };
     }
@@ -390,25 +395,49 @@ function normalizeLegacySearchResults(record: Record<string, unknown>): SearchRe
       id: `result-${index}`,
       title: readString(item.title) ?? `Result ${index + 1}`,
       content: readString(item.snippet) ?? "",
-      source: "web",
+      source: "web" as const,
       score: readNumber(item.score) ?? 0.5,
       url: readString(item.url),
     };
   });
+  const localResults: SearchResult[] = Array.isArray(record.retrieved_sources)
+    ? record.retrieved_sources.map((item, index) => ({
+        id: `local-${index}`,
+        title: typeof item === "string" ? item : `Local Result ${index + 1}`,
+        content: "Loaded from the local knowledge base.",
+        source: "local" as const,
+        score: 0.7,
+      }))
+    : [];
+  const skillResults: SearchResult[] = Array.isArray(record.matched_skills)
+    ? record.matched_skills.map((item, index) => ({
+        id: `skill-${index}`,
+        title: typeof item === "string" ? item : `Skill ${index + 1}`,
+        content: "Matched from the saved skills library.",
+        source: "skill" as const,
+        score: 0.75,
+      }))
+    : [];
+  return [...webResults, ...localResults, ...skillResults];
 }
 
 function normalizeLegacyGeneratedFiles(record: Record<string, unknown>): FileNode[] {
   const files = Array.isArray(record.generated_files) ? record.generated_files : [];
+  const deletedFiles = Array.isArray(record.generated_deleted_files)
+    ? record.generated_deleted_files.filter((item): item is string => typeof item === "string")
+    : [];
   return files.map((item) => {
     const path = typeof item === "string" ? item : "unknown";
     return {
       name: path.split("/").pop() ?? path,
       path,
       type: "file",
-      status: Array.isArray(record.generated_modified_files) &&
-        record.generated_modified_files.includes(path)
-        ? "modified"
-        : "new",
+      status: deletedFiles.includes(path)
+        ? "deleted"
+        : Array.isArray(record.generated_modified_files) &&
+            record.generated_modified_files.includes(path)
+          ? "modified"
+          : "new",
     };
   });
 }

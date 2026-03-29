@@ -11,16 +11,24 @@ export interface ChatStreamConnection {
   close: () => void;
 }
 
+interface StreamParams {
+  runtime_mode?: "classic" | "deepagents";
+}
+
 export function openChatStream(
   baseUrl: string,
   sessionId: string,
   message: string,
+  streamParams: StreamParams,
   handlers: ChatStreamHandlers,
 ): ChatStreamConnection {
   const params = new URLSearchParams({
     session_id: sessionId,
     message,
   });
+  if (streamParams.runtime_mode) {
+    params.set("runtime_mode", streamParams.runtime_mode);
+  }
   const target = `${baseUrl.replace(/\/$/, "")}/api/chat/stream?${params.toString()}`;
   const source = new EventSource(target);
 

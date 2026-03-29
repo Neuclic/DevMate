@@ -1,5 +1,5 @@
 ---
-name: Build Static Site
+name: build-static-site
 description: Use this skill when the user asks for a small static website with a clear file split and lightweight client-side behavior.
 keywords:
   - website
@@ -9,9 +9,7 @@ keywords:
   - javascript
   - map
   - static
-tools:
-  - search_local_knowledge
-  - search_web
+allowed-tools: "search_local_knowledge search_web"
 ---
 
 # Build Static Site

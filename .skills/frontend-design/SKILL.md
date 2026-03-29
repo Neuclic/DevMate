@@ -7,9 +7,7 @@ keywords:
   - layout
   - responsive
   - ui
-allowed-tools:
-  - search_local_knowledge
-  - search_web
+allowed-tools: "search_local_knowledge search_web"
 metadata:
   origin: anthropics-skills-inspired
   demo-fit: high

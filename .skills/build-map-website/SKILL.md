@@ -1,5 +1,5 @@
 ---
-name: Build Map Website
+name: build-map-website
 description: Use this skill when the task is a map-first trail or location website that needs SDK isolation and responsive UI.
 keywords:
   - map
@@ -8,9 +8,7 @@ keywords:
   - mapbox
   - responsive
   - trail
-tools:
-  - search_local_knowledge
-  - search_web
+allowed-tools: "search_local_knowledge search_web"
 ---
 
 # Build Map Website

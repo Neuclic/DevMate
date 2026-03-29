@@ -77,6 +77,28 @@ class FakeRuntime:
         yield {"type": "complete", "summary": "Completed stream."}
 
 
+class FakeDeepRuntime(FakeRuntime):
+    """Runtime stub for the deepagents route selection tests."""
+
+    def handle_prompt(self, *args: object, **kwargs: object) -> PromptResult:
+        del args, kwargs
+        return PromptResult(
+            session_id=None,
+            summary="Deep summary",
+            planned_files=["deep.txt"],
+            implementation_steps=["Use deepagents."],
+            retrieved_sources=[],
+            matched_skills=[],
+            web_results=[],
+            web_search_attempted=False,
+            agent_used_model=True,
+            generated_files=["deep.txt", "obsolete.txt"],
+            generated_created_files=["deep.txt"],
+            generated_deleted_files=["obsolete.txt"],
+            generation_used_model=True,
+        )
+
+
 def _make_test_root() -> Path:
     root = WORKSPACE_ROOT / "test_scratch" / uuid4().hex
     root.mkdir(parents=True, exist_ok=False)
@@ -144,7 +166,12 @@ def test_chat_stream_emits_incremental_events() -> None:
         settings = load_settings(config_path)
         store = SessionStore(root / ".sessions")
         runtime = FakeRuntime(SkillRegistry(skills_dir))
-        app = create_app(settings, runtime=runtime, session_store=store)
+        app = create_app(
+            settings,
+            runtime=runtime,
+            session_store=store,
+            runtime_state_path=root / ".runtime" / "ui-settings.json",
+        )
         client = TestClient(app)
 
         session = client.post("/api/sessions", json={"title": "Stream Demo"}).json()
@@ -192,7 +219,12 @@ def test_chat_stream_complete_event_includes_trace_links(monkeypatch) -> None:
                 shared_url="https://smith.langchain.com/public/share",
             ),
         )
-        app = create_app(settings, runtime=runtime, session_store=store)
+        app = create_app(
+            settings,
+            runtime=runtime,
+            session_store=store,
+            runtime_state_path=root / ".runtime" / "ui-settings.json",
+        )
         client = TestClient(app)
 
         session = client.post("/api/sessions", json={"title": "Stream Demo"}).json()
@@ -232,7 +264,12 @@ def test_chat_response_includes_trace_payload(monkeypatch) -> None:
                 shared_url="https://smith.langchain.com/public/share",
             ),
         )
-        app = create_app(settings, runtime=runtime, session_store=store)
+        app = create_app(
+            settings,
+            runtime=runtime,
+            session_store=store,
+            runtime_state_path=root / ".runtime" / "ui-settings.json",
+        )
         client = TestClient(app)
 
         session = client.post("/api/sessions", json={"title": "Trace Demo"}).json()
@@ -279,11 +316,17 @@ def test_file_endpoints_return_generated_content() -> None:
                 planned_files=["index.html", "js/main.js"],
                 implementation_steps=["Create HTML", "Create JS"],
                 generation_output_dir=str(output_dir.resolve()),
-                generated_files=["index.html", "js/main.js"],
+                generated_files=["index.html", "js/main.js", "obsolete.txt"],
                 generated_created_files=["index.html", "js/main.js"],
+                generated_deleted_files=["obsolete.txt"],
             ),
         )
-        app = create_app(settings, runtime=runtime, session_store=store)
+        app = create_app(
+            settings,
+            runtime=runtime,
+            session_store=store,
+            runtime_state_path=root / ".runtime" / "ui-settings.json",
+        )
         client = TestClient(app)
 
         files_response = client.get(f"/api/files/{session.session_id}")
@@ -313,7 +356,12 @@ def test_settings_endpoints_round_trip_runtime_overrides() -> None:
         settings = load_settings(config_path)
         store = SessionStore(root / ".sessions")
         runtime = FakeRuntime(SkillRegistry(skills_dir))
-        app = create_app(settings, runtime=runtime, session_store=store)
+        app = create_app(
+            settings,
+            runtime=runtime,
+            session_store=store,
+            runtime_state_path=root / ".runtime" / "ui-settings.json",
+        )
         client = TestClient(app)
 
         get_response = client.get("/api/settings")
@@ -351,7 +399,12 @@ def test_upload_endpoints_save_docs_and_skills() -> None:
         settings = load_settings(config_path)
         store = SessionStore(root / ".sessions")
         runtime = FakeRuntime(SkillRegistry(skills_dir))
-        app = create_app(settings, runtime=runtime, session_store=store)
+        app = create_app(
+            settings,
+            runtime=runtime,
+            session_store=store,
+            runtime_state_path=root / ".runtime" / "ui-settings.json",
+        )
         client = TestClient(app)
 
         docs_response = client.post(
@@ -369,3 +422,44 @@ def test_upload_endpoints_save_docs_and_skills() -> None:
     assert skills_response.status_code == 200
     assert len(docs_response.json()["saved_files"]) == 1
     assert len(skills_response.json()["saved_files"]) == 1
+
+
+def test_chat_can_switch_to_deepagents_runtime() -> None:
+    root = _make_test_root()
+    try:
+        docs_dir = root / "docs"
+        skills_dir = root / ".skills"
+        docs_dir.mkdir()
+        skills_dir.mkdir()
+        config_path = root / "config.toml"
+        _write_config(config_path, docs_dir=docs_dir, skills_dir=skills_dir)
+        settings = load_settings(config_path)
+        store = SessionStore(root / ".sessions")
+        runtime = FakeRuntime(SkillRegistry(skills_dir))
+        deep_runtime = FakeDeepRuntime(SkillRegistry(skills_dir))
+        app = create_app(
+            settings,
+            runtime=runtime,
+            deepagents_runtime=deep_runtime,
+            session_store=store,
+            runtime_state_path=root / ".runtime" / "ui-settings.json",
+        )
+        client = TestClient(app)
+
+        session = client.post("/api/sessions", json={"title": "Deep Demo"}).json()
+        response = client.post(
+            "/api/chat",
+            json={
+                "session_id": session["id"],
+                "message": "use deepagents",
+                "runtime_mode": "deepagents",
+            },
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["result"]["summary"] == "Deep summary"
+    assert payload["result"]["generated_files"] == ["deep.txt", "obsolete.txt"]
+    assert payload["result"]["generated_deleted_files"] == ["obsolete.txt"]

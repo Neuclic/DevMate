@@ -84,6 +84,7 @@ export interface UiSettings {
   theme: "light" | "dark" | "system";
   language: "zh-CN" | "en-US";
   fontSize: "sm" | "md" | "lg";
+  runtimeMode: "classic" | "deepagents";
   modelName: string;
   temperature: number;
   maxTokens: number;
@@ -103,6 +104,7 @@ export interface ModelOption {
 }
 
 export interface RuntimeSettings {
+  runtime_mode?: "classic" | "deepagents";
   model_name: string;
   ai_base_url: string;
   api_key: string;

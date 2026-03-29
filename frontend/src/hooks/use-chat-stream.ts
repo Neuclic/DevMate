@@ -5,6 +5,7 @@ import { apiClient } from "@/lib/api-client";
 import { openChatStream, type ChatStreamConnection } from "@/lib/sse-client";
 import { generateId } from "@/lib/utils";
 import { useChatStore } from "@/store/chat-store";
+import { useUiStore } from "@/store/ui-store";
 import type { ChatResponse, Message } from "@/types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -39,6 +40,7 @@ function buildAssistantPlaceholder(sessionId: string): Message {
 export function useChatStream() {
   const queryClient = useQueryClient();
   const connectionRef = useRef<ChatStreamConnection | null>(null);
+  const runtimeMode = useUiStore((state) => state.settings.runtimeMode);
   const appendMessage = useChatStore((state) => state.appendMessage);
   const appendAssistantContent = useChatStore((state) => state.appendAssistantContent);
   const updateAssistantStatus = useChatStore((state) => state.updateAssistantStatus);
@@ -94,7 +96,7 @@ export function useChatStream() {
         }
         settled = true;
         try {
-          const response = await apiClient.postChat(sessionId, content);
+          const response = await apiClient.postChat(sessionId, content, runtimeMode);
           hydrateFromResponse(sessionId, assistantMessage.id, response);
         } catch (error) {
           updateAssistantStatus(
@@ -111,7 +113,14 @@ export function useChatStream() {
       };
 
       try {
-        connectionRef.current = openChatStream(API_BASE_URL, sessionId, content, {
+        connectionRef.current = openChatStream(
+          API_BASE_URL,
+          sessionId,
+          content,
+          {
+            runtime_mode: runtimeMode,
+          },
+          {
           onEvent: (event) => {
             if (settled) {
               return;
@@ -165,7 +174,8 @@ export function useChatStream() {
           onClose: () => {
             connectionRef.current = null;
           },
-        });
+          },
+        );
       } catch (error) {
         await runFallback(error instanceof Error ? error.message : "Unable to start chat stream.");
       }
@@ -181,6 +191,7 @@ export function useChatStream() {
       setTraceInfo,
       updateAssistantStatus,
       upsertPlanningStep,
+      runtimeMode,
     ],
   );
 

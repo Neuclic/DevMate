@@ -43,8 +43,7 @@ class SkillRegistry:
             lines.append("keywords:")
             lines.extend(f"  - {keyword.strip()}" for keyword in note.keywords if keyword.strip())
         if note.tools:
-            lines.append("tools:")
-            lines.extend(f"  - {tool.strip()}" for tool in note.tools if tool.strip())
+            lines.append(f'allowed-tools: "{" ".join(tool.strip() for tool in note.tools if tool.strip())}"')
         lines.extend(
             [
                 "---",
@@ -168,7 +167,9 @@ class SkillRegistry:
         summary = metadata.get("description") or self._extract_section(body, "summary") or ""
         steps = self._extract_steps(body)
         keywords = self._parse_list_value(metadata.get("keywords", ""))
-        tools = self._parse_list_value(metadata.get("tools", ""))
+        tools = self._parse_list_value(
+            metadata.get("allowed-tools", "") or metadata.get("tools", "")
+        )
         slug = path.parent.name
         return SkillNote(
             name=name,

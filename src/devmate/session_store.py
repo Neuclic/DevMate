@@ -53,6 +53,7 @@ class SessionTurn:
     generated_files: list[str] = field(default_factory=list)
     generated_created_files: list[str] = field(default_factory=list)
     generated_modified_files: list[str] = field(default_factory=list)
+    generated_deleted_files: list[str] = field(default_factory=list)
     generation_used_model: bool = False
     generation_error: str | None = None
     saved_skill_path: str | None = None

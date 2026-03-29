@@ -7,8 +7,7 @@ keywords:
   - tool
   - transport
   - healthcheck
-allowed-tools:
-  - search_local_knowledge
+allowed-tools: "search_local_knowledge"
 metadata:
   origin: anthropics-skills-inspired
   demo-fit: medium

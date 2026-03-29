@@ -7,8 +7,7 @@ keywords:
   - browser
   - qa
   - responsive
-allowed-tools:
-  - search_local_knowledge
+allowed-tools: "search_local_knowledge"
 metadata:
   origin: anthropics-skills-inspired
   demo-fit: high

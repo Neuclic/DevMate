@@ -42,6 +42,7 @@ class PromptResult:
     generated_files: list[str] | None = None
     generated_created_files: list[str] | None = None
     generated_modified_files: list[str] | None = None
+    generated_deleted_files: list[str] | None = None
     generation_used_model: bool = False
     saved_skill_path: str | None = None
     web_search_error: str | None = None

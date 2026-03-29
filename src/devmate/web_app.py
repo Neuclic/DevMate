@@ -17,6 +17,7 @@ import uvicorn
 
 from devmate.agent_runtime import DevMateRuntime
 from devmate.config_loader import AppSettings
+from devmate.deepagents_runtime import DeepAgentsRuntime
 from devmate.observability import latest_trace_info, trace_start_time
 from devmate.session_store import SessionRecord, SessionStore, SessionSummary, SessionTurn
 from devmate.skill_registry import SkillNote, SkillRegistry
@@ -63,6 +64,7 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     prompt: str | None = None
     message: str | None = None
+    runtime_mode: str = "classic"
     generate: bool = True
     output_dir: str | None = None
     save_skill_name: str | None = None
@@ -97,17 +99,30 @@ def create_app(
     settings: AppSettings,
     *,
     runtime: DevMateRuntime | None = None,
+    deepagents_runtime: DeepAgentsRuntime | None = None,
     session_store: SessionStore | None = None,
+    runtime_state_path: Path | None = None,
 ) -> FastAPI:
     store = session_store or SessionStore(Path(".sessions"))
-    initial_settings = _apply_runtime_overrides(settings, _load_runtime_overrides(RUNTIME_STATE_PATH))
+    state_path = runtime_state_path or RUNTIME_STATE_PATH
+    initial_settings = _apply_runtime_overrides(settings, _load_runtime_overrides(state_path))
     state: dict[str, Any] = {
         "settings": initial_settings,
         "runtime": runtime or DevMateRuntime(settings=initial_settings, session_store=store),
+        "deepagents_runtime": deepagents_runtime,
+        "runtime_state_path": state_path,
     }
     app = FastAPI(title="DevMate API")
 
-    def current_runtime() -> DevMateRuntime:
+    def current_runtime(runtime_mode: str = "classic"):
+        normalized = _normalize_runtime_mode(runtime_mode)
+        if normalized == "deepagents":
+            if state["deepagents_runtime"] is None:
+                state["deepagents_runtime"] = DeepAgentsRuntime(
+                    settings=state["settings"],
+                    session_store=store,
+                )
+            return state["deepagents_runtime"]
         return state["runtime"]
 
     def current_settings() -> AppSettings:
@@ -116,6 +131,7 @@ def create_app(
     def rebuild_runtime(new_settings: AppSettings) -> None:
         state["settings"] = new_settings
         state["runtime"] = DevMateRuntime(settings=new_settings, session_store=store)
+        state["deepagents_runtime"] = None
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
@@ -149,7 +165,7 @@ def create_app(
         started_at = trace_start_time()
         output_dir = _resolve_output_dir(payload.output_dir, session_id)
         result = await to_thread.run_sync(
-            lambda: current_runtime().handle_prompt(
+            lambda: current_runtime(payload.runtime_mode).handle_prompt(
                 prompt,
                 save_skill_name=payload.save_skill_name,
                 generate_output_dir=output_dir if payload.generate else None,
@@ -177,6 +193,7 @@ def create_app(
     async def chat_stream(
         session_id: str,
         message: str,
+        runtime_mode: str = "classic",
         generate: bool = True,
         output_dir: str | None = None,
         save_skill_name: str | None = None,
@@ -185,7 +202,7 @@ def create_app(
             started_at = trace_start_time()
             pending_complete: dict[str, object] | None = None
             resolved_output_dir = _resolve_output_dir(output_dir, session_id)
-            for event in current_runtime().stream_prompt(
+            for event in current_runtime(runtime_mode).stream_prompt(
                 message,
                 save_skill_name=save_skill_name,
                 generate_output_dir=resolved_output_dir if generate else None,
@@ -238,6 +255,7 @@ def create_app(
             return []
         status_map = {path: "new" for path in turn.generated_created_files}
         status_map.update({path: "modified" for path in turn.generated_modified_files})
+        status_map.update({path: "deleted" for path in turn.generated_deleted_files})
         files: list[dict[str, object]] = []
         for path in sorted(output_dir.rglob("*")):
             if not path.is_file():
@@ -270,7 +288,7 @@ def create_app(
             "search_limit": payload.search_limit,
             "share_public_traces": payload.share_public_traces,
         }
-        _save_runtime_overrides(RUNTIME_STATE_PATH, overrides)
+        _save_runtime_overrides(state["runtime_state_path"], overrides)
         new_settings = _apply_runtime_overrides(settings, overrides)
         rebuild_runtime(new_settings)
         return _settings_payload(new_settings)
@@ -340,6 +358,13 @@ def _resolve_output_dir(output_dir: str | None, session_id: str) -> Path:
     return Path("generated-output") / session_id
 
 
+def _normalize_runtime_mode(runtime_mode: str | None) -> str:
+    mode = (runtime_mode or "classic").strip().lower()
+    if mode == "deepagents":
+        return "deepagents"
+    return "classic"
+
+
 def _get_session_or_404(store: SessionStore, session_id: str) -> SessionRecord:
     record = store.get_session(session_id)
     if record is None:
@@ -395,7 +420,11 @@ def _assistant_message_payload(session_id: str, turn: SessionTurn | None) -> dic
             "name": Path(path).name,
             "path": path,
             "type": "file",
-            "status": "modified" if path in turn.generated_modified_files else "new",
+            "status": (
+                "deleted"
+                if path in turn.generated_deleted_files
+                else "modified" if path in turn.generated_modified_files else "new"
+            ),
         }
         for path in turn.generated_files
     ]

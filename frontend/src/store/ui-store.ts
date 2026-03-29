@@ -22,6 +22,7 @@ const defaultSettings: UiSettings = {
   theme: "system",
   language: "zh-CN",
   fontSize: "md",
+  runtimeMode: "classic",
   modelName: "MiniMax-M2",
   temperature: 0.2,
   maxTokens: 4096,

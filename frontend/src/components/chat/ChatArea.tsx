@@ -8,6 +8,7 @@ import { apiClient } from "@/lib/api-client";
 import { useChatStream } from "@/hooks/use-chat-stream";
 import { useChatStore } from "@/store/chat-store";
 import { useSessionStore } from "@/store/session-store";
+import { useUiStore } from "@/store/ui-store";
 import type { Message } from "@/types";
 
 const EMPTY_MESSAGES: Message[] = [];
@@ -19,6 +20,7 @@ export function ChatArea() {
   const hydrateMessages = useChatStore((state) => state.hydrateMessages);
   const messagesBySession = useChatStore((state) => state.messagesBySession);
   const activeStreamingSessionId = useChatStore((state) => state.activeStreamingSessionId);
+  const runtimeMode = useUiStore((state) => state.settings.runtimeMode);
   const { sendMessage, stop } = useChatStream();
   const [draft, setDraft] = useState("");
 
@@ -79,9 +81,14 @@ export function ChatArea() {
         <div className="mx-auto flex max-w-4xl items-center justify-between gap-4">
           <div>
             <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Chat Area</p>
-            <h2 className="text-xl font-semibold text-foreground">
-              {selectedSessionId ? `Session ${selectedSessionId}` : "选择一个会话开始"}
-            </h2>
+            <div className="flex items-center gap-3">
+              <h2 className="text-xl font-semibold text-foreground">
+                {selectedSessionId ? `Session ${selectedSessionId}` : "选择一个会话开始"}
+              </h2>
+              <span className="rounded-full border border-border bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                {runtimeMode === "deepagents" ? "DeepAgents Runtime" : "Classic Runtime"}
+              </span>
+            </div>
           </div>
           {detailQuery.isFetching ? <span className="text-sm text-muted-foreground">同步会话中...</span> : null}
         </div>

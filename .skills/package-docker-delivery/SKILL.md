@@ -1,5 +1,5 @@
 ---
-name: Package Docker Delivery
+name: package-docker-delivery
 description: Use this skill when the task needs a containerized handoff with a predictable startup command and runtime verification.
 keywords:
   - docker
@@ -8,8 +8,7 @@ keywords:
   - deployment
   - handoff
   - runtime
-tools:
-  - search_local_knowledge
+allowed-tools: "search_local_knowledge"
 ---
 
 # Package Docker Delivery

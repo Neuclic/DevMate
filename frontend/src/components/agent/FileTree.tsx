@@ -62,6 +62,22 @@ function buildTree(files: FileNode[]): FileNode[] {
   return root;
 }
 
+function mergeFilesWithDeleted(serverFiles: FileNode[], localFiles: FileNode[]): FileNode[] {
+  const merged = new Map<string, FileNode>();
+  for (const file of serverFiles) {
+    merged.set(file.path, file);
+  }
+  for (const file of localFiles) {
+    const existing = merged.get(file.path);
+    if (existing) {
+      merged.set(file.path, { ...existing, status: file.status ?? existing.status });
+      continue;
+    }
+    merged.set(file.path, file);
+  }
+  return Array.from(merged.values()).sort((a, b) => a.path.localeCompare(b.path));
+}
+
 function FileNodeItem({ node, onOpen }: { node: FileNode; onOpen: (node: FileNode) => void }) {
   if (node.type === "directory") {
     return (
@@ -79,10 +95,20 @@ function FileNodeItem({ node, onOpen }: { node: FileNode; onOpen: (node: FileNod
     );
   }
 
+  const isDeleted = node.status === "deleted";
+
   return (
     <button
-      className="flex w-full items-center justify-between rounded-lg border border-border/60 bg-background px-3 py-2 text-left text-sm hover:border-brand/40 hover:bg-muted/50"
-      onClick={() => onOpen(node)}
+      className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left text-sm ${
+        isDeleted
+          ? "border-destructive/30 bg-destructive/5 text-muted-foreground"
+          : "border-border/60 bg-background hover:border-brand/40 hover:bg-muted/50"
+      }`}
+      onClick={() => {
+        if (!isDeleted) {
+          onOpen(node);
+        }
+      }}
       type="button"
     >
       <span className="flex items-center gap-2 truncate">
@@ -100,9 +126,10 @@ export function FileTree({ files, sessionId }: FileTreeProps) {
     queryFn: () => apiClient.getFiles(sessionId!),
     enabled: Boolean(sessionId),
   });
-  const resolvedFiles = serverFilesQuery.data && serverFilesQuery.data.length > 0
-    ? serverFilesQuery.data
-    : files;
+  const resolvedFiles = useMemo(
+    () => mergeFilesWithDeleted(serverFilesQuery.data ?? [], files),
+    [serverFilesQuery.data, files],
+  );
   const tree = useMemo(() => buildTree(resolvedFiles), [resolvedFiles]);
   const [activeFile, setActiveFile] = useState<FileNode | null>(null);
   const [content, setContent] = useState("文件内容预览将在这里显示。");

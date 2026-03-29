@@ -28,6 +28,7 @@ type SettingsValues = z.infer<typeof settingsSchema>;
 
 export function SettingsForm() {
   const updateSettings = useUiStore((state) => state.updateSettings);
+  const runtimeMode = useUiStore((state) => state.settings.runtimeMode);
   const [docFiles, setDocFiles] = useState<File[]>([]);
 
   const settingsQuery = useQuery({
@@ -64,6 +65,7 @@ export function SettingsForm() {
       share_public_traces: settingsQuery.data.share_public_traces,
     });
     updateSettings({
+      runtimeMode: settingsQuery.data.runtime_mode ?? "classic",
       modelName: settingsQuery.data.model_name,
       apiKey: settingsQuery.data.api_key,
       searchLimit: settingsQuery.data.search_limit,
@@ -76,6 +78,7 @@ export function SettingsForm() {
     mutationFn: (values: SettingsValues) => apiClient.updateSettings(values),
     onSuccess: (data) => {
       updateSettings({
+        runtimeMode,
         modelName: data.model_name,
         apiKey: data.api_key,
         searchLimit: data.search_limit,
@@ -121,6 +124,22 @@ export function SettingsForm() {
         <CardContent>
           <form className="grid gap-6" onSubmit={form.handleSubmit(onSubmit)}>
             <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">执行引擎</label>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  value={runtimeMode}
+                  onChange={(event) =>
+                    updateSettings({
+                      runtimeMode:
+                        event.target.value === "deepagents" ? "deepagents" : "classic",
+                    })
+                  }
+                >
+                  <option value="classic">Classic Runtime</option>
+                  <option value="deepagents">DeepAgents Runtime</option>
+                </select>
+              </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">模型</label>
                 <select

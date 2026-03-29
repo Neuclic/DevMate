@@ -1,5 +1,5 @@
 ---
-name: Build Demo Map Website
+name: build-demo-map-website
 description: Prepared an initial implementation plan from 4 local snippets, 3 matched skills and 5 web results.
 keywords:
   - build
