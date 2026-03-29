@@ -142,12 +142,13 @@ python -m http.server 9001
 
 最近一次验证拿到的公开 trace 链接：
 
-- [Shared Trace](https://smith.langchain.com/public/6f00f954-8343-4c22-a98e-6e86606d0fc1/r)
+- [Shared Trace](https://smith.langchain.com/public/0e806a72-936a-4ee7-8243-175fdc5e272d/r)
 
 说明：
 
-- 这条 trace 对应一次成功的端到端运行
-- 运行中包含模型规划、本地 RAG、MCP web search 和最终响应写回
+- 这条 trace 对应一次成功的 `deepagents` 运行
+- 运行中包含真实文件写入、文件删除和命令执行
+- 生成结果里包含 `index.html`、`css/style.css`、`js/main.js`
 
 ## 当前交付判断
 
